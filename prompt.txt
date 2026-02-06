@@ -1,0 +1,50 @@
+You are an expert Rust engineer. Implement a Rust CLI tool named "apispec" that inspects OpenAPI 3.1.0 specs.
+
+apispec is a developer tool for exploring and understanding APIs described with **OpenAPI 3.1.0**. It is designed to be fast, simple, and usable without reading documentation.
+
+User experience:
+- The user runs `apispec <source>` from the terminal.
+- `<source>` can be:
+  - a local OpenAPI file
+  - a direct OpenAPI URL
+  - a base API URL (the tool should automatically find the OpenAPI spec)
+- The tool launches an interactive terminal UI where the user can navigate the API.
+
+Core behavior:
+- The app loads the OpenAPI specification, stores it locally, and refreshes it on every launch.
+- If the network is unavailable, the app uses the last cached version and clearly indicates this.
+- Only OpenAPI **3.1.0** is supported. Other versions must fail with a clear message.
+
+Interactive UI:
+- Left side: a searchable list of API endpoints.
+- Right side: detailed information for the selected endpoint.
+- Users can move with keyboard only (nvim movement <D-s>and arrows).
+- The UI must feel responsive even for large specs.
+
+Information shown:
+- Endpoint method and path
+- Summary and description
+- Parameters (grouped by path, query, header, cookie)
+- Request body formats and schemas
+- Response status codes and schemas
+- Schema details must be readable and concise
+
+Design principles:
+- Fast startup
+- No configuration required
+- Works offline after first load
+- Clear errors, no silent failures
+- Sensible defaults over flexibility
+
+Scope boundaries:
+- Read-only exploration (no API calling)
+- No authentication flows
+- No OpenAPI versions other than 3.1.0
+
+Deliverable:
+- A complete, working CLI + TUI application implementing the above.
+- Reasonable defaults and a clean UX.
+- Code should be production-quality and maintainable.
+
+Do not over-engineer. Focus on usability and correctness.
+
