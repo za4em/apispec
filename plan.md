@@ -349,6 +349,8 @@ Files:
 
 Deliverable: expandable request/response/schema content with deterministic row IDs.
 
+Status: Done (implemented in this session).
+
 ### Phase 4: Visual rendering integration
 
 Files:
@@ -474,12 +476,12 @@ Use this as a resumable execution checklist after clearing context.
 
 ### Phase 3: Structured details and schema engine
 
-- [ ] Add `src/spec/schema_tree.rs` for resolved, cycle-safe schema traversal.
-- [ ] Add `src/tui/details.rs` for sectioned detail document and row/toggle IDs.
-- [ ] Add expand/collapse state for request body, responses, content types, schema nodes.
-- [ ] Add breadcrumb/active-node tracking in details focus.
-- [ ] Add tests for cycles, unresolved refs, composed schema fallback behavior.
-- [ ] Run `cargo test`.
+- [x] Add `src/spec/schema_tree.rs` for resolved, cycle-safe schema traversal.
+- [x] Add `src/tui/details.rs` for sectioned detail document and row/toggle IDs.
+- [x] Add expand/collapse state for request body, responses, content types, schema nodes.
+- [x] Add breadcrumb/active-node tracking in details focus.
+- [x] Add tests for cycles, unresolved refs, composed schema fallback behavior.
+- [x] Run `cargo test`.
 
 ### Phase 4: Rendering integration
 

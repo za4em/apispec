@@ -1,7 +1,8 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::cache::metadata::CacheState;
-use crate::spec::index::{EndpointSummary, RequestBodyView, ResponseView};
+use crate::spec::index::EndpointSummary;
+use crate::tui::details::{DetailSection, DetailsDocument, build_details_document};
 use crate::tui::tree::{TreeModel, TreeRow, TreeRowKind};
 
 const MIN_DETAIL_WIDTH: u16 = 24;
@@ -20,25 +21,11 @@ pub enum FocusPanel {
     Details,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DetailSection {
-    Overview,
-    Parameters,
-    RequestBody,
-    Responses,
-    Security,
-}
-
-impl DetailSection {
-    fn next(self) -> Self {
-        match self {
-            Self::Overview => Self::Parameters,
-            Self::Parameters => Self::RequestBody,
-            Self::RequestBody => Self::Responses,
-            Self::Responses => Self::Security,
-            Self::Security => Self::Overview,
-        }
-    }
+#[derive(Debug, Clone, Default)]
+struct DetailsState {
+    expanded_toggles: HashSet<String>,
+    active_breadcrumb: Option<String>,
+    last_detail_width: u16,
 }
 
 #[derive(Debug, Clone)]
@@ -57,7 +44,8 @@ pub struct AppState {
     selected_tree_row: usize,
     selected_endpoint_id: Option<usize>,
     detail_scroll: usize,
-    detail_cache: HashMap<(usize, u16), Vec<String>>,
+    detail_cache: HashMap<(usize, u16, String), DetailsDocument>,
+    details_state: DetailsState,
     search_query: String,
     input_mode: InputMode,
     focus_panel: FocusPanel,
@@ -104,6 +92,7 @@ impl AppState {
             selected_endpoint_id,
             detail_scroll: 0,
             detail_cache: HashMap::new(),
+            details_state: DetailsState::default(),
             search_query: String::new(),
             input_mode: InputMode::Normal,
             focus_panel: FocusPanel::Tree,
@@ -162,10 +151,44 @@ impl AppState {
 
     pub fn cycle_detail_section(&mut self) {
         self.active_detail_section = self.active_detail_section.next();
+        let active_section = self.active_detail_section;
+        let width = self.details_state.last_detail_width.max(MIN_DETAIL_WIDTH);
+        let next_position = self
+            .detail_document_for_selected(width)
+            .and_then(|document| {
+                document
+                    .section_line_start(active_section)
+                    .map(|line_start| {
+                        let breadcrumb =
+                            document.breadcrumb_for_line(line_start).map(str::to_owned);
+                        (line_start, breadcrumb)
+                    })
+            });
+        if let Some((line_start, breadcrumb)) = next_position {
+            self.detail_scroll = line_start;
+            self.details_state.active_breadcrumb = breadcrumb;
+        }
     }
 
     pub fn toggle_detail_item(&mut self) {
-        // Placeholder for Phase 3 expandable details toggles.
+        let width = self.details_state.last_detail_width.max(MIN_DETAIL_WIDTH);
+        let current_scroll = self.detail_scroll;
+        let Some(toggle_target) = self
+            .detail_document_for_selected(width)
+            .and_then(|document| document.nearest_toggle_row(current_scroll))
+            .and_then(|row| row.toggle_target.as_deref())
+            .map(str::to_owned)
+        else {
+            return;
+        };
+
+        if self.details_state.expanded_toggles.remove(&toggle_target) {
+            // collapsed
+        } else {
+            self.details_state.expanded_toggles.insert(toggle_target);
+        }
+
+        self.drop_detail_cache_for_selected_endpoint();
     }
 
     pub fn push_search_char(&mut self, ch: char) {
@@ -287,7 +310,7 @@ impl AppState {
             TreeRowKind::Endpoint => {
                 if self.selected_endpoint_id != row.endpoint_id {
                     self.selected_endpoint_id = row.endpoint_id;
-                    self.detail_scroll = 0;
+                    self.reset_details_navigation();
                 }
                 true
             }
@@ -296,15 +319,18 @@ impl AppState {
 
     pub fn scroll_detail_up(&mut self, steps: usize) {
         self.detail_scroll = self.detail_scroll.saturating_sub(steps);
+        self.update_active_breadcrumb_for_current_scroll();
     }
 
     pub fn scroll_detail_down(&mut self, steps: usize, detail_height: u16, detail_width: u16) {
+        self.details_state.last_detail_width = detail_width.max(MIN_DETAIL_WIDTH);
         if detail_height == 0 {
             return;
         }
         let detail_len = self.detail_lines_for_selected(detail_width).len();
         let max_scroll = detail_len.saturating_sub(detail_height as usize);
         self.detail_scroll = (self.detail_scroll + steps).min(max_scroll);
+        self.update_active_breadcrumb_for_current_scroll();
     }
 
     pub fn detail_scroll(&self) -> usize {
@@ -312,31 +338,35 @@ impl AppState {
     }
 
     pub fn clamp_detail_scroll(&mut self, detail_height: u16, detail_width: u16) {
+        self.details_state.last_detail_width = detail_width.max(MIN_DETAIL_WIDTH);
         let detail_len = self.detail_lines_for_selected(detail_width).len();
         let max_scroll = detail_len.saturating_sub(detail_height as usize);
         if self.detail_scroll > max_scroll {
             self.detail_scroll = max_scroll;
         }
+        self.update_active_breadcrumb_for_current_scroll();
     }
 
     pub fn detail_lines_for_selected(&mut self, detail_width: u16) -> &[String] {
-        let Some(endpoint_index) = self.selected_endpoint_index() else {
+        self.details_state.last_detail_width = detail_width.max(MIN_DETAIL_WIDTH);
+        if self.selected_endpoint_index().is_none() {
             return &self.empty_detail_lines;
-        };
-        let bucket = width_bucket(detail_width);
-        let endpoint_id = self.endpoints[endpoint_index].id;
-        let key = (endpoint_id, bucket);
-
-        if !self.detail_cache.contains_key(&key) {
-            let rendered =
-                render_endpoint_detail_lines(&self.endpoints[endpoint_index], bucket as usize);
-            self.detail_cache.insert(key, rendered);
         }
 
-        self.detail_cache
-            .get(&key)
-            .expect("detail cache entry must exist after insertion check")
-            .as_slice()
+        let current_scroll = self.detail_scroll;
+        self.details_state.active_breadcrumb = self
+            .detail_document_for_selected(detail_width)
+            .and_then(|document| document.breadcrumb_for_line(current_scroll))
+            .map(str::to_owned);
+
+        let document = self
+            .detail_document_for_selected(detail_width)
+            .expect("selected endpoint should always render a details document");
+        document.lines.as_slice()
+    }
+
+    pub fn active_breadcrumb(&self) -> Option<&str> {
+        self.details_state.active_breadcrumb.as_deref()
     }
 
     pub fn status_line(&self) -> String {
@@ -367,6 +397,46 @@ impl AppState {
         )
     }
 
+    fn detail_document_for_selected(&mut self, detail_width: u16) -> Option<&DetailsDocument> {
+        let endpoint_index = self.selected_endpoint_index()?;
+        let endpoint = self.endpoints.get(endpoint_index)?;
+        let bucket = width_bucket(detail_width);
+        let expansion_fingerprint = self.expansion_fingerprint(endpoint.id);
+        let cache_key = (endpoint.id, bucket, expansion_fingerprint);
+
+        if !self.detail_cache.contains_key(&cache_key) {
+            let document = build_details_document(
+                endpoint,
+                bucket as usize,
+                &self.details_state.expanded_toggles,
+            );
+            self.detail_cache.insert(cache_key.clone(), document);
+        }
+
+        self.detail_cache.get(&cache_key)
+    }
+
+    fn expansion_fingerprint(&self, endpoint_id: usize) -> String {
+        let prefix = format!("endpoint:{endpoint_id}:");
+        let mut toggles = self
+            .details_state
+            .expanded_toggles
+            .iter()
+            .filter(|value| value.starts_with(&prefix))
+            .cloned()
+            .collect::<Vec<_>>();
+        toggles.sort();
+        toggles.join("|")
+    }
+
+    fn drop_detail_cache_for_selected_endpoint(&mut self) {
+        let Some(endpoint_id) = self.selected_endpoint_id else {
+            return;
+        };
+        self.detail_cache
+            .retain(|(cached_endpoint_id, _, _), _| *cached_endpoint_id != endpoint_id);
+    }
+
     fn selected_endpoint_index(&self) -> Option<usize> {
         let endpoint_id = self.selected_endpoint_id?;
         self.endpoint_positions_by_id.get(&endpoint_id).copied()
@@ -395,14 +465,14 @@ impl AppState {
         if let Some(endpoint_id) = row_endpoint {
             if self.selected_endpoint_id != Some(endpoint_id) {
                 self.selected_endpoint_id = Some(endpoint_id);
-                self.detail_scroll = 0;
+                self.reset_details_navigation();
             }
             return;
         }
 
         if self.selected_endpoint_id.is_none() {
             self.selected_endpoint_id = self.tree_model.first_visible_endpoint_id();
-            self.detail_scroll = 0;
+            self.reset_details_navigation();
         }
     }
 
@@ -418,7 +488,7 @@ impl AppState {
         if self.tree_model.rows_visible.is_empty() {
             self.selected_tree_row = 0;
             self.selected_endpoint_id = None;
-            self.detail_scroll = 0;
+            self.reset_details_navigation();
             self.focus_panel = FocusPanel::Tree;
             return;
         }
@@ -465,7 +535,7 @@ impl AppState {
         }
 
         if self.selected_endpoint_id != next_selected_endpoint {
-            self.detail_scroll = 0;
+            self.reset_details_navigation();
         }
 
         self.selected_endpoint_id = next_selected_endpoint;
@@ -473,6 +543,20 @@ impl AppState {
         if self.focus_panel == FocusPanel::Details && self.selected_endpoint_id.is_none() {
             self.focus_panel = FocusPanel::Tree;
         }
+    }
+
+    fn reset_details_navigation(&mut self) {
+        self.detail_scroll = 0;
+        self.details_state.active_breadcrumb = None;
+    }
+
+    fn update_active_breadcrumb_for_current_scroll(&mut self) {
+        let width = self.details_state.last_detail_width.max(MIN_DETAIL_WIDTH);
+        let current_scroll = self.detail_scroll;
+        self.details_state.active_breadcrumb = self
+            .detail_document_for_selected(width)
+            .and_then(|document| document.breadcrumb_for_line(current_scroll))
+            .map(str::to_owned);
     }
 }
 
@@ -491,257 +575,6 @@ fn build_endpoint_label(endpoint: &EndpointSummary) -> String {
 fn width_bucket(width: u16) -> u16 {
     let width = width.max(MIN_DETAIL_WIDTH);
     (width / WIDTH_BUCKET_SIZE).max(1) * WIDTH_BUCKET_SIZE
-}
-
-fn render_endpoint_detail_lines(endpoint: &EndpointSummary, width: usize) -> Vec<String> {
-    let mut lines = Vec::new();
-
-    push_wrapped_line(
-        &mut lines,
-        &format!("{} {}", endpoint.method, endpoint.path),
-        width,
-        "  ",
-    );
-    push_wrapped_line(&mut lines, &endpoint.title, width, "  ");
-    if let Some(operation_id) = endpoint.operation_id.as_deref() {
-        push_wrapped_line(
-            &mut lines,
-            &format!("Operation ID: {operation_id}"),
-            width,
-            "  ",
-        );
-    }
-    lines.push(String::new());
-
-    lines.push("Description".to_owned());
-    if let Some(description) = endpoint.description.as_deref() {
-        for line in description.lines() {
-            push_wrapped_line(&mut lines, line, width, "  ");
-        }
-    } else {
-        lines.push("None".to_owned());
-    }
-    lines.push(String::new());
-
-    lines.push("Parameters".to_owned());
-    render_parameter_group(&mut lines, "Path", &endpoint.grouped_parameters.path, width);
-    render_parameter_group(
-        &mut lines,
-        "Query",
-        &endpoint.grouped_parameters.query,
-        width,
-    );
-    render_parameter_group(
-        &mut lines,
-        "Header",
-        &endpoint.grouped_parameters.header,
-        width,
-    );
-    render_parameter_group(
-        &mut lines,
-        "Cookie",
-        &endpoint.grouped_parameters.cookie,
-        width,
-    );
-    if endpoint.grouped_parameters.path.is_empty()
-        && endpoint.grouped_parameters.query.is_empty()
-        && endpoint.grouped_parameters.header.is_empty()
-        && endpoint.grouped_parameters.cookie.is_empty()
-    {
-        lines.push("None".to_owned());
-    }
-    for unresolved in &endpoint.grouped_parameters.unresolved_refs {
-        push_wrapped_line(
-            &mut lines,
-            &format!("Unresolved parameter ref: {unresolved}"),
-            width,
-            "  ",
-        );
-    }
-    lines.push(String::new());
-
-    lines.push("Request Body".to_owned());
-    render_request_body(&mut lines, endpoint.request_body.as_ref(), width);
-    lines.push(String::new());
-
-    lines.push("Responses".to_owned());
-    render_responses(&mut lines, &endpoint.responses, width);
-
-    lines
-}
-
-fn render_parameter_group(
-    lines: &mut Vec<String>,
-    title: &str,
-    parameters: &[crate::spec::index::ParameterView],
-    width: usize,
-) {
-    if parameters.is_empty() {
-        return;
-    }
-
-    lines.push(format!("{title}:"));
-    for parameter in parameters {
-        let required_flag = if parameter.required {
-            "required"
-        } else {
-            "optional"
-        };
-        let mut line = format!("  - {} ({required_flag})", parameter.name);
-        if let Some(schema) = parameter.schema.as_deref() {
-            line.push_str(&format!(" :: {schema}"));
-        }
-        push_wrapped_line(lines, &line, width, "    ");
-        if let Some(description) = parameter.description.as_deref() {
-            push_wrapped_line(lines, &format!("    {description}"), width, "      ");
-        }
-    }
-}
-
-fn render_request_body(
-    lines: &mut Vec<String>,
-    request_body: Option<&RequestBodyView>,
-    width: usize,
-) {
-    let Some(request_body) = request_body else {
-        lines.push("None".to_owned());
-        return;
-    };
-
-    let required = if request_body.required {
-        "required"
-    } else {
-        "optional"
-    };
-    lines.push(format!("Required: {required}"));
-
-    if request_body.media_types.is_empty() {
-        lines.push("Media types: none".to_owned());
-    } else {
-        lines.push("Media types:".to_owned());
-        for media_type in &request_body.media_types {
-            let mut line = format!("  - {}", media_type.content_type);
-            if let Some(schema) = media_type.schema.as_deref() {
-                line.push_str(&format!(" :: {schema}"));
-            }
-            push_wrapped_line(lines, &line, width, "    ");
-        }
-    }
-
-    if let Some(unresolved) = request_body.unresolved_ref.as_deref() {
-        push_wrapped_line(
-            lines,
-            &format!("Unresolved request body ref: {unresolved}"),
-            width,
-            "  ",
-        );
-    }
-}
-
-fn render_responses(lines: &mut Vec<String>, responses: &[ResponseView], width: usize) {
-    if responses.is_empty() {
-        lines.push("None".to_owned());
-        return;
-    }
-
-    for response in responses {
-        let description = response
-            .description
-            .as_deref()
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or("no description");
-        push_wrapped_line(
-            lines,
-            &format!("{}: {}", response.status, description),
-            width,
-            "  ",
-        );
-        if response.media_types.is_empty() {
-            lines.push("  media: none".to_owned());
-        } else {
-            for media_type in &response.media_types {
-                let mut line = format!("  media {} ", media_type.content_type);
-                if let Some(schema) = media_type.schema.as_deref() {
-                    line.push_str(&format!(":: {schema}"));
-                } else {
-                    line.push_str(":: any");
-                }
-                push_wrapped_line(lines, &line, width, "    ");
-            }
-        }
-        if let Some(unresolved) = response.unresolved_ref.as_deref() {
-            push_wrapped_line(
-                lines,
-                &format!("  unresolved ref: {unresolved}"),
-                width,
-                "    ",
-            );
-        }
-    }
-}
-
-fn push_wrapped_line(lines: &mut Vec<String>, line: &str, width: usize, continuation_indent: &str) {
-    let width = width.max(8);
-    let trimmed = line.trim_end();
-    if trimmed.is_empty() {
-        lines.push(String::new());
-        return;
-    }
-
-    let mut current = trimmed.to_owned();
-    while current.chars().count() > width {
-        let mut split_index = split_index_for_width(&current, width);
-        if split_index == 0 || split_index >= current.len() {
-            split_index = hard_split_index(&current, width);
-        }
-        if split_index == 0 || split_index >= current.len() {
-            lines.push(current);
-            return;
-        }
-
-        let (head, tail) = current.split_at(split_index);
-        lines.push(head.trim_end().to_owned());
-        let remaining = tail.trim_start();
-        if remaining.is_empty() {
-            return;
-        }
-        current = format!("{continuation_indent}{remaining}");
-    }
-    lines.push(current);
-}
-
-fn split_index_for_width(value: &str, width: usize) -> usize {
-    let mut last_space = None;
-    let mut fallback_index = value.len();
-    let mut first_non_whitespace = value.len();
-
-    for (char_count, (idx, ch)) in value.char_indices().enumerate() {
-        if !ch.is_whitespace() && first_non_whitespace == value.len() {
-            first_non_whitespace = idx;
-        }
-
-        if char_count >= width {
-            fallback_index = idx;
-            break;
-        }
-
-        // Ignore leading indentation when choosing whitespace split points;
-        // otherwise wrapping can repeatedly split before the content and loop.
-        if ch.is_whitespace() && idx >= first_non_whitespace {
-            last_space = Some(idx);
-        }
-    }
-
-    last_space.filter(|idx| *idx > 0).unwrap_or(fallback_index)
-}
-
-fn hard_split_index(value: &str, width: usize) -> usize {
-    for (char_count, (idx, _)) in value.char_indices().enumerate() {
-        if char_count >= width {
-            return idx;
-        }
-    }
-    value.len()
 }
 
 #[cfg(test)]
@@ -964,17 +797,69 @@ paths:
     }
 
     #[test]
-    fn wraps_long_unbroken_tokens_without_infinite_loop() {
-        let mut lines = Vec::new();
-        push_wrapped_line(
-            &mut lines,
-            "  - aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            12,
-            "      ",
+    fn toggles_expand_request_body_and_schema_rows() {
+        let spec = parse_spec(
+            r#"
+openapi: 3.1.0
+info:
+  title: demo
+  version: 1.0.0
+paths:
+  /items:
+    post:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                id:
+                  type: integer
+      responses:
+        "200":
+          description: ok
+"#,
+        );
+        let endpoints = build_endpoint_index(&spec);
+        let mut state = AppState::new(demo_context(), endpoints);
+
+        let initial_lines = state.detail_lines_for_selected(100).to_vec();
+        assert!(
+            !initial_lines
+                .iter()
+                .any(|line| line.contains("id : integer"))
         );
 
-        assert!(lines.len() > 1);
-        assert!(lines.len() < 20);
-        assert!(lines.iter().any(|line| line.contains("aaaa")));
+        state.toggle_detail_item();
+        let request_expanded = state.detail_lines_for_selected(100).to_vec();
+        let media_line = request_expanded
+            .iter()
+            .position(|line| line.contains("application/json"))
+            .expect("request media row should be visible after expanding request body");
+
+        state.detail_scroll = media_line;
+        state.toggle_detail_item();
+        let media_expanded = state.detail_lines_for_selected(100).to_vec();
+        let schema_line = media_expanded
+            .iter()
+            .position(|line| line.contains("schema : object"))
+            .expect("schema root row should be visible after expanding media type");
+
+        state.detail_scroll = schema_line;
+        state.toggle_detail_item();
+        let schema_expanded = state.detail_lines_for_selected(100).to_vec();
+        let id_line = schema_expanded
+            .iter()
+            .position(|line| line.contains("id : integer"))
+            .expect("schema property row should be visible when schema root is expanded");
+
+        state.detail_scroll = id_line;
+        state.clamp_detail_scroll(1, 100);
+        assert!(
+            state
+                .active_breadcrumb()
+                .is_some_and(|breadcrumb| breadcrumb.contains("id"))
+        );
     }
 }

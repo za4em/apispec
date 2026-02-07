@@ -6,6 +6,7 @@ use oas3::spec::{
 };
 
 use crate::spec::render::{summarize_media_type_schema, summarize_parameter_schema};
+use crate::spec::schema_tree::{SchemaNode, build_schema_tree};
 
 const METHOD_ORDER: [&str; 8] = [
     "GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD", "TRACE",
@@ -34,6 +35,7 @@ pub struct ParameterView {
 pub struct MediaTypeView {
     pub content_type: String,
     pub schema: Option<String>,
+    pub schema_tree: Option<SchemaNode>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -407,6 +409,10 @@ fn build_media_type_views(
         rendered.push(MediaTypeView {
             content_type: content_type.clone(),
             schema: summarize_media_type_schema(media_type, spec),
+            schema_tree: media_type
+                .schema
+                .as_ref()
+                .map(|schema| build_schema_tree(schema, spec, "schema")),
         });
     }
     rendered
