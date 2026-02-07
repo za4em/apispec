@@ -5,7 +5,8 @@ use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 
 use crate::tui::event::FrameMetrics;
-use crate::tui::state::{AppState, InputMode};
+use crate::tui::state::{AppState, FocusPanel, InputMode};
+use crate::tui::tree::TreeRowKind;
 
 pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) -> FrameMetrics {
     let root_layout = Layout::default()
@@ -36,7 +37,7 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) -> FrameMetrics {
         .split(main_layout[0]);
 
     draw_search(frame, state, left_layout[0]);
-    draw_endpoint_list(frame, state, left_layout[1]);
+    draw_endpoint_tree(frame, state, left_layout[1]);
     let metrics = draw_endpoint_details(frame, state, main_layout[1]);
 
     let help = Paragraph::new(help_text(state.input_mode())).style(
@@ -55,7 +56,15 @@ fn draw_search(frame: &mut Frame<'_>, state: &AppState, area: ratatui::layout::R
         InputMode::Normal => "Search (/ or Ctrl+s)",
         InputMode::Search => "Search (typing)",
     };
-    let search_block = Block::default().borders(Borders::ALL).title(search_title);
+    let border_style = if matches!(state.input_mode(), InputMode::Search) {
+        focused_border_style()
+    } else {
+        unfocused_border_style()
+    };
+    let search_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(border_style)
+        .title(search_title);
     let search_text = if state.search_query().is_empty() {
         "<empty>".to_owned()
     } else {
@@ -64,37 +73,60 @@ fn draw_search(frame: &mut Frame<'_>, state: &AppState, area: ratatui::layout::R
     frame.render_widget(Paragraph::new(search_text).block(search_block), area);
 }
 
-fn draw_endpoint_list(frame: &mut Frame<'_>, state: &AppState, area: ratatui::layout::Rect) {
+fn draw_endpoint_tree(frame: &mut Frame<'_>, state: &AppState, area: ratatui::layout::Rect) {
     let title = format!(
-        "Endpoints ({}/{})",
+        "Tree ({}/{})",
         state.filtered_count(),
         state.endpoint_count()
     );
+    let is_focused = state.focus_panel() == FocusPanel::Tree;
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_style(if is_focused {
+            focused_border_style()
+        } else {
+            unfocused_border_style()
+        });
 
-    if state.filtered_indices().is_empty() {
-        let empty = Paragraph::new("No endpoints match the current filter.")
-            .block(Block::default().title(title).borders(Borders::ALL));
+    if state.tree_rows().is_empty() {
+        let empty = Paragraph::new("No endpoints match the current filter.").block(block);
         frame.render_widget(empty, area);
         return;
     }
 
     let items = state
-        .filtered_indices()
+        .tree_rows()
         .iter()
-        .map(|index| ListItem::new(state.endpoint_label(*index).to_owned()))
+        .map(|row| {
+            let text = state.tree_row_display_label(row);
+            let style = match row.kind {
+                TreeRowKind::Group => Style::default().add_modifier(Modifier::BOLD),
+                TreeRowKind::Endpoint => Style::default(),
+            };
+            ListItem::new(text).style(style)
+        })
         .collect::<Vec<_>>();
+
+    let highlight_style = if is_focused {
+        Style::default()
+            .bg(Color::Blue)
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+            .bg(Color::DarkGray)
+            .fg(Color::White)
+            .add_modifier(Modifier::DIM)
+    };
+
     let list = List::new(items)
-        .block(Block::default().title(title).borders(Borders::ALL))
-        .highlight_style(
-            Style::default()
-                .bg(Color::Blue)
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
-        )
+        .block(block)
+        .highlight_style(highlight_style)
         .highlight_symbol("> ");
 
     let mut list_state = ListState::default();
-    list_state.select(state.selected_filtered_index());
+    list_state.select(state.selected_tree_row_index());
     frame.render_stateful_widget(list, area, &mut list_state);
 }
 
@@ -104,7 +136,14 @@ fn draw_endpoint_details(
     area: ratatui::layout::Rect,
 ) -> FrameMetrics {
     let title = format!("Details ({})", state.context().source_label);
-    let block = Block::default().borders(Borders::ALL).title(title);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(title)
+        .border_style(if state.focus_panel() == FocusPanel::Details {
+            focused_border_style()
+        } else {
+            unfocused_border_style()
+        });
     let inner = block.inner(area);
     let detail_width = inner.width.max(1);
     let detail_height = inner.height.max(1);
@@ -130,10 +169,20 @@ fn draw_endpoint_details(
     }
 }
 
+fn focused_border_style() -> Style {
+    Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD)
+}
+
+fn unfocused_border_style() -> Style {
+    Style::default().fg(Color::Gray)
+}
+
 fn help_text(mode: InputMode) -> &'static str {
     match mode {
         InputMode::Normal => {
-            "q quit | j/k or up/down move | g/G first/last | PgUp/PgDn jump | h/l or left/right scroll details | / or Ctrl+s search | Ctrl+u clear filter"
+            "q quit | Tree: j/k move g/G first/last PgUp/PgDn jump Enter open Right toggle group | Details: j/k scroll Tab next section Enter toggle Esc back | / or Ctrl+s search | Ctrl+u clear"
         }
         InputMode::Search => {
             "Search mode: type to filter | Backspace delete | Ctrl+u clear | Enter or Esc to return"

@@ -1,6 +1,7 @@
 pub mod event;
 pub mod keymap;
 pub mod state;
+pub mod tree;
 pub mod view;
 
 use std::io::{self, Stdout};

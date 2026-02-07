@@ -334,6 +334,8 @@ Files:
 
 Deliverable: keyboard behavior contract implemented and unit-tested.
 
+Status: Done (implemented in this session).
+
 ### Phase 3: Structured details and schema engine
 
 Files:
@@ -461,14 +463,14 @@ Use this as a resumable execution checklist after clearing context.
 
 ### Phase 2: Tree model and state machine
 
-- [ ] Create `src/tui/tree.rs` with group nodes, visible rows, expansion logic.
-- [ ] Replace flat filtered list state in `src/tui/state.rs` with tree-aware state.
-- [ ] Add `FocusPanel { Tree, Details }` and transition-safe reducers.
-- [ ] Preserve endpoint selection across filter updates where possible.
-- [ ] Update `src/tui/keymap.rs` with tree/details contextual actions.
-- [ ] Update `src/tui/event.rs` dispatch to new actions and clamping logic.
-- [ ] Add tests for selection persistence, auto-expand-on-filter, focus transitions.
-- [ ] Run `cargo test`.
+- [x] Create `src/tui/tree.rs` with group nodes, visible rows, expansion logic.
+- [x] Replace flat filtered list state in `src/tui/state.rs` with tree-aware state.
+- [x] Add `FocusPanel { Tree, Details }` and transition-safe reducers.
+- [x] Preserve endpoint selection across filter updates where possible.
+- [x] Update `src/tui/keymap.rs` with tree/details contextual actions.
+- [x] Update `src/tui/event.rs` dispatch to new actions and clamping logic.
+- [x] Add tests for selection persistence, auto-expand-on-filter, focus transitions.
+- [x] Run `cargo test`.
 
 ### Phase 3: Structured details and schema engine
 
