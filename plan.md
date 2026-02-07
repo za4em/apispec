@@ -543,11 +543,11 @@ Exit criteria:
 
 ### Phase 2: Fetch + cache + strict validation
 
-- [ ] Implement local/remote loading path with refresh-on-launch behavior.
-- [ ] Implement cache store and metadata model.
-- [ ] Implement conditional HTTP refresh (`ETag` / `Last-Modified`).
-- [ ] Implement offline fallback from cache.
-- [ ] Implement parse + strict OpenAPI `3.1.0` validation.
+- [x] Implement local/remote loading path with refresh-on-launch behavior.
+- [x] Implement cache store and metadata model.
+- [x] Implement conditional HTTP refresh (`ETag` / `Last-Modified`).
+- [x] Implement offline fallback from cache.
+- [x] Implement parse + strict OpenAPI `3.1.0` validation.
 
 ### Phase 3: Discovery and indexing
 
@@ -568,3 +568,90 @@ Exit criteria:
 - [ ] Add snapshot-style tests for schema rendering.
 - [ ] Run and clean `fmt`/`clippy`/`test`.
 - [ ] Finalize user-facing docs and usage examples.
+
+---
+
+## 17. Session Handoff Notes (After Phase 2)
+
+Use this section when resuming after context reset.
+
+### 17.1 Current implementation status
+
+1. Phase 1 is complete.
+2. Phase 2 is complete for:
+   1. Local file load + cache refresh.
+   2. Direct spec URL load + cache refresh.
+   3. Conditional HTTP fetch (`ETag` / `If-Modified-Since`).
+   4. Offline fallback to cached spec when network is unavailable.
+   5. Strict OpenAPI version gate: exact `3.1.0` only.
+3. Base URL discovery (`apispec https://api.example.com`) is intentionally not implemented yet and currently fails with a clear Phase 2 message.
+
+### 17.2 Key runtime behavior (as implemented)
+
+1. `apispec <local-file>`:
+   1. Reads file.
+   2. Parses + validates strict `3.1.0`.
+   3. Writes cached bytes + metadata.
+2. `apispec <direct-spec-url>`:
+   1. Reads cache metadata if present.
+   2. Sends conditional request when metadata has validators.
+   3. `200` -> parse/validate + overwrite cache.
+   4. `304` -> load cached bytes.
+   5. Network unavailable:
+      1. With cache -> load cache (`OfflineStale`).
+      2. Without cache -> fail with `OfflineNoCache`.
+3. CLI currently prints:
+   1. Resolved source kind.
+   2. Resolved spec source.
+   3. Loaded OpenAPI version.
+   4. Cache state + timestamp (when available).
+
+### 17.3 Important code locations
+
+1. Loader orchestration: `src/spec/load.rs`.
+2. Strict parse/validate logic: `src/spec/validate.rs`.
+3. HTTP fetch + conditional headers: `src/source/fetch.rs`.
+4. Cache metadata/state model: `src/cache/metadata.rs`.
+5. Cache store implementation: `src/cache/store.rs`.
+6. Error surface/messages: `src/error.rs`.
+7. CLI output integration: `src/app.rs`.
+
+### 17.4 Cache and environment notes
+
+1. Default cache root:
+   `ProjectDirs::from("dev", "apispec", "apispec").cache_dir()/specs`.
+2. Cache key:
+   `sha256(canonical_source)`.
+3. Override cache root for local testing:
+   set `APISPEC_CACHE_DIR=<path>`.
+4. Cache metadata parse errors are intentionally tolerated (metadata becomes `None`) so stale-but-valid cached spec bytes still load.
+
+### 17.5 Validation status at handoff
+
+Last successful checks:
+
+1. `cargo fmt`
+2. `cargo clippy --all-targets --all-features -- -D warnings`
+3. `cargo test` (`17` passing tests)
+
+### 17.6 Suggested immediate next work (Phase 3)
+
+1. Implement base URL discovery in `src/source/discover.rs`:
+   1. `service-desc` link/header parsing.
+   2. Candidate endpoint probing (`/openapi.json`, `/v3/api-docs`, etc.).
+2. Integrate discovery into `load_spec_for_source` for `SourceKind::BaseUrl`.
+3. Build endpoint index and render summaries in:
+   1. `src/spec/index.rs`
+   2. `src/spec/render.rs`
+4. Add discovery integration tests using `httpmock`:
+   1. `service-desc` success path.
+   2. Candidate probing success path.
+   3. Full failure with attempted URL list in error text.
+
+### 17.7 Guardrails to keep
+
+1. Keep strict OpenAPI support gate at exact `3.1.0` unless product requirement changes.
+2. Preserve offline behavior:
+   1. never silently fail,
+   2. never ignore network failure without explicit cached fallback state.
+3. Keep cache writes atomic (temp file + rename).

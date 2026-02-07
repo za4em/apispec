@@ -2,4 +2,5 @@ pub mod classify;
 pub mod discover;
 pub mod fetch;
 
-pub use classify::classify_source;
+pub use classify::{SourceInput, SourceKind, classify_source};
+pub use fetch::{ConditionalFetchHeaders, FetchOutcome, fetch_spec};
