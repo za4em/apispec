@@ -1,28 +1,31 @@
 use std::collections::HashSet;
 use std::sync::LazyLock;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use regex::Regex;
 use reqwest::StatusCode;
 use reqwest::blocking::Client;
-use reqwest::header::{ACCEPT, HeaderMap, LINK, USER_AGENT};
+use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap, LINK, USER_AGENT};
 use url::Url;
 
 use crate::error::AppError;
 use crate::spec::validate::parse_and_validate;
 
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
+const DISCOVERY_BUDGET: Duration = Duration::from_secs(20);
+const MAX_HINT_BODY_BYTES: usize = 256 * 1024;
+const SNIFF_BYTES: usize = 8 * 1024;
 
 const KNOWN_DISCOVERY_PATHS: [&str; 8] = [
-    "/openapi.json",
-    "/openapi.yaml",
-    "/openapi.yml",
-    "/v3/api-docs",
-    "/v3/api-docs.yaml",
-    "/swagger/v1/swagger.json",
-    "/swagger.json",
-    "/swagger.yaml",
+    "openapi.json",
+    "openapi.yaml",
+    "openapi.yml",
+    "v3/api-docs",
+    "v3/api-docs.yaml",
+    "swagger/v1/swagger.json",
+    "swagger.json",
+    "swagger.yaml",
 ];
 
 static HTML_SERVICE_DESC_LINK_REL_FIRST: LazyLock<Regex> = LazyLock::new(|| {
@@ -65,6 +68,7 @@ pub fn discover_spec_url(base_url: &str) -> Result<DiscoveryResult, AppError> {
         input: base_url.to_owned(),
         source,
     })?;
+    let started_at = Instant::now();
     let client = build_client(base_url)?;
     let mut discovery_trace = vec![format!("Starting discovery from {base_url}")];
     let mut candidates = Vec::new();
@@ -72,20 +76,27 @@ pub fn discover_spec_url(base_url: &str) -> Result<DiscoveryResult, AppError> {
 
     match fetch_success_response(&client, base.as_str()) {
         Ok(base_response) => {
-            match parse_and_validate(&base_response.bytes, &base_response.resolved_url) {
-                Ok(_) => {
-                    return Ok(DiscoveryResult {
-                        spec_url: base_response.resolved_url.clone(),
-                        attempted_urls: vec![base_response.resolved_url],
-                        discovery_trace,
-                    });
+            if looks_like_openapi_document(&base_response.headers, &base_response.bytes) {
+                match parse_and_validate(&base_response.bytes, &base_response.resolved_url) {
+                    Ok(_) => {
+                        return Ok(DiscoveryResult {
+                            spec_url: base_response.resolved_url.clone(),
+                            attempted_urls: vec![base_response.resolved_url],
+                            discovery_trace,
+                        });
+                    }
+                    Err(AppError::SpecParse { .. })
+                    | Err(AppError::UnsupportedOpenApiVersion { .. }) => {}
+                    Err(other) => return Err(other),
                 }
-                Err(AppError::SpecParse { .. })
-                | Err(AppError::UnsupportedOpenApiVersion { .. }) => {}
-                Err(other) => return Err(other),
+            } else {
+                discovery_trace.push(
+                    "Base URL response is not OpenAPI-like; continuing discovery probes".to_owned(),
+                );
             }
 
-            let body = String::from_utf8_lossy(&base_response.bytes);
+            let hint_body_len = base_response.bytes.len().min(MAX_HINT_BODY_BYTES);
+            let body = String::from_utf8_lossy(&base_response.bytes[..hint_body_len]);
             let hint_base =
                 Url::parse(&base_response.resolved_url).unwrap_or_else(|_| base.clone());
             for hint in extract_service_desc_link_hints(&base_response.headers) {
@@ -114,38 +125,53 @@ pub fn discover_spec_url(base_url: &str) -> Result<DiscoveryResult, AppError> {
         Err(other) => return Err(other),
     }
 
-    for path in KNOWN_DISCOVERY_PATHS {
-        if let Ok(url) = base.join(path) {
-            push_unique_candidate(&mut candidates, &mut seen, url.to_string());
-        }
-    }
+    push_known_candidates(&base, &mut candidates, &mut seen);
 
     let mut attempted_urls = Vec::new();
+    let mut timed_out = false;
     for candidate in candidates {
+        if started_at.elapsed() >= DISCOVERY_BUDGET {
+            timed_out = true;
+            discovery_trace.push(format!(
+                "Stopped discovery after {}s time budget",
+                DISCOVERY_BUDGET.as_secs()
+            ));
+            break;
+        }
+
         attempted_urls.push(candidate.clone());
         match fetch_success_response(&client, &candidate) {
-            Ok(success) => match parse_and_validate(&success.bytes, &success.resolved_url) {
-                Ok(_) => {
-                    discovery_trace.push(format!(
-                        "Resolved OpenAPI document at {}",
-                        success.resolved_url
-                    ));
-                    return Ok(DiscoveryResult {
-                        spec_url: success.resolved_url,
-                        attempted_urls,
-                        discovery_trace,
-                    });
+            Ok(success) => {
+                if !looks_like_openapi_document(&success.headers, &success.bytes) {
+                    discovery_trace
+                        .push(format!("Rejected {candidate}: payload is not OpenAPI-like"));
+                    continue;
                 }
-                Err(AppError::SpecParse { .. }) => {
-                    discovery_trace.push(format!("Rejected {candidate}: not an OpenAPI document"));
+
+                match parse_and_validate(&success.bytes, &success.resolved_url) {
+                    Ok(_) => {
+                        discovery_trace.push(format!(
+                            "Resolved OpenAPI document at {}",
+                            success.resolved_url
+                        ));
+                        return Ok(DiscoveryResult {
+                            spec_url: success.resolved_url,
+                            attempted_urls,
+                            discovery_trace,
+                        });
+                    }
+                    Err(AppError::SpecParse { .. }) => {
+                        discovery_trace
+                            .push(format!("Rejected {candidate}: not an OpenAPI document"));
+                    }
+                    Err(AppError::UnsupportedOpenApiVersion { found }) => {
+                        discovery_trace.push(format!(
+                            "Rejected {candidate}: unsupported OpenAPI version {found}"
+                        ));
+                    }
+                    Err(other) => return Err(other),
                 }
-                Err(AppError::UnsupportedOpenApiVersion { found }) => {
-                    discovery_trace.push(format!(
-                        "Rejected {candidate}: unsupported OpenAPI version {found}"
-                    ));
-                }
-                Err(other) => return Err(other),
-            },
+            }
             Err(AppError::HttpStatus { status, .. }) => {
                 discovery_trace.push(format!("Probe {candidate} returned HTTP {status}"));
             }
@@ -159,11 +185,17 @@ pub fn discover_spec_url(base_url: &str) -> Result<DiscoveryResult, AppError> {
         }
     }
 
-    let attempted = if attempted_urls.is_empty() {
+    let mut attempted = if attempted_urls.is_empty() {
         "(no candidates generated)".to_owned()
     } else {
         attempted_urls.join(", ")
     };
+    if timed_out {
+        attempted.push_str(&format!(
+            ", [stopped after {}s discovery budget]",
+            DISCOVERY_BUDGET.as_secs()
+        ));
+    }
 
     Err(AppError::DiscoveryFailed {
         base_url: base_url.to_owned(),
@@ -253,6 +285,62 @@ fn push_unique_candidate(
     if seen.insert(candidate.clone()) {
         candidates.push(candidate);
     }
+}
+
+fn push_known_candidates(base: &Url, candidates: &mut Vec<String>, seen: &mut HashSet<String>) {
+    let base_dir = ensure_directory_base(base);
+    for path in KNOWN_DISCOVERY_PATHS {
+        if let Ok(prefixed_url) = base_dir.join(path) {
+            push_unique_candidate(candidates, seen, prefixed_url.to_string());
+        }
+
+        if let Ok(root_url) = base.join(&format!("/{path}")) {
+            push_unique_candidate(candidates, seen, root_url.to_string());
+        }
+    }
+}
+
+fn looks_like_openapi_document(headers: &HeaderMap, bytes: &[u8]) -> bool {
+    if let Some(content_type) = headers
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+    {
+        let content_type = content_type.to_ascii_lowercase();
+        if content_type.contains("text/html") {
+            return false;
+        }
+        if content_type.contains("application/json")
+            || content_type.contains("application/yaml")
+            || content_type.contains("text/yaml")
+            || content_type.contains("application/x-yaml")
+            || content_type.contains("application/vnd.oai.openapi")
+        {
+            return true;
+        }
+    }
+
+    let sniff_len = bytes.len().min(SNIFF_BYTES);
+    let sniff_bytes = &bytes[..sniff_len];
+    let trimmed = trim_ascii_start(sniff_bytes);
+    if trimmed.is_empty() {
+        return false;
+    }
+    if trimmed[0] == b'{' || trimmed[0] == b'[' {
+        return true;
+    }
+
+    let sniff_text = String::from_utf8_lossy(trimmed).to_ascii_lowercase();
+    sniff_text.contains("openapi:")
+        || sniff_text.contains("\"openapi\"")
+        || sniff_text.contains("'openapi'")
+}
+
+fn trim_ascii_start(bytes: &[u8]) -> &[u8] {
+    let start = bytes
+        .iter()
+        .position(|value| !value.is_ascii_whitespace())
+        .unwrap_or(bytes.len());
+    &bytes[start..]
 }
 
 fn extract_service_desc_link_hints(headers: &HeaderMap) -> Vec<String> {
@@ -539,6 +627,28 @@ paths: {}
     }
 
     #[test]
+    fn probes_prefixed_candidates_for_base_url_with_path_prefix() {
+        let server = MockServer::start();
+        let root = server.mock(|when, then| {
+            when.method(GET).path("/api");
+            then.status(200).body("<html><body>no hints</body></html>");
+        });
+        let prefixed_openapi = server.mock(|when, then| {
+            when.method(GET).path("/api/openapi.json");
+            then.status(200).body(demo_spec_json());
+        });
+
+        let discovered = discover_spec_url(&format!("{}/api", server.base_url())).unwrap();
+
+        root.assert();
+        prefixed_openapi.assert();
+        assert_eq!(
+            discovered.spec_url,
+            format!("{}/api/openapi.json", server.base_url())
+        );
+    }
+
+    #[test]
     fn returns_deterministic_error_when_no_candidates_match() {
         let server = MockServer::start();
         let _root = server.mock(|when, then| {
@@ -596,5 +706,58 @@ paths: {}
         let hints = extract_service_desc_link_hints(&headers);
 
         assert_eq!(hints, vec!["/docs/openapi.json"]);
+    }
+
+    #[test]
+    fn skips_html_catch_all_candidates() {
+        let server = MockServer::start();
+        let root = server.mock(|when, then| {
+            when.method(GET).path("/");
+            then.status(200)
+                .header("Content-Type", "text/html; charset=utf-8")
+                .body("<html><body>docs shell</body></html>");
+        });
+        let openapi_json = server.mock(|when, then| {
+            when.method(GET).path("/openapi.json");
+            then.status(200)
+                .header("Content-Type", "text/html; charset=utf-8")
+                .body("<html><body>docs shell</body></html>");
+        });
+        let v3_docs = server.mock(|when, then| {
+            when.method(GET).path("/v3/api-docs");
+            then.status(200).body(demo_spec_json());
+        });
+
+        let discovered = discover_spec_url(&server.base_url()).unwrap();
+
+        root.assert();
+        openapi_json.assert();
+        v3_docs.assert();
+        assert!(discovered.spec_url.ends_with("/v3/api-docs"));
+        assert!(
+            discovered
+                .discovery_trace
+                .iter()
+                .any(|line| line.contains("payload is not OpenAPI-like"))
+        );
+    }
+
+    #[test]
+    fn openapi_payload_sniffer_rejects_html() {
+        let mut headers = HeaderMap::new();
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("text/html"));
+        assert!(!looks_like_openapi_document(
+            &headers,
+            b"<html><body>docs</body></html>"
+        ));
+    }
+
+    #[test]
+    fn openapi_payload_sniffer_accepts_yaml_without_content_type() {
+        let headers = HeaderMap::new();
+        assert!(looks_like_openapi_document(
+            &headers,
+            b"openapi: 3.1.0\ninfo:\n  title: demo\n  version: 1.0.0\npaths: {}\n"
+        ));
     }
 }

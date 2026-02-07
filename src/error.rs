@@ -100,4 +100,10 @@ pub enum AppError {
 
     #[error("Unsupported OpenAPI version `{found}`. This tool currently supports only `3.1.0`.")]
     UnsupportedOpenApiVersion { found: String },
+
+    #[error("Terminal UI error ({source}).")]
+    TuiRuntime {
+        #[source]
+        source: std::io::Error,
+    },
 }

@@ -380,63 +380,76 @@ If your spec lives elsewhere, pass it directly: apispec <full-spec-url>.`
 
 ## Phase 1: Bootstrap and plumbing
 
-1. Create crate and module skeleton.
-2. Add dependencies and error scaffolding.
-3. Implement CLI arg parsing.
-4. Implement source classification.
+Checklist:
+
+- [x] Create crate and module skeleton.
+- [x] Add dependencies and error scaffolding.
+- [x] Implement CLI arg parsing.
+- [x] Implement source classification.
 
 Exit criteria:
 
-1. `apispec <source>` validates inputs and prints resolved source kind.
+- [x] `apispec <source>` validates inputs and reaches source resolution flow.
 
 ## Phase 2: Fetch + cache + strict validation
 
-1. Implement local load path.
-2. Implement remote fetch with conditional requests.
-3. Implement cache storage and metadata.
-4. Implement parse + strict `3.1.0` validation.
+Checklist:
+
+- [x] Implement local load path.
+- [x] Implement remote fetch with conditional requests.
+- [x] Implement cache storage and metadata.
+- [x] Implement parse + strict `3.1.0` validation.
 
 Exit criteria:
 
-1. Works for local and direct URL.
-2. Fails cleanly for non-3.1.0.
-3. Offline fallback works with existing cache.
+- [x] Works for local and direct URL.
+- [x] Fails cleanly for non-3.1.0.
+- [x] Offline fallback works with existing cache.
 
 ## Phase 3: Discovery and indexing
 
-1. Implement base URL discovery algorithm.
-2. Implement endpoint extraction and parameter merge.
-3. Implement request/response/schema summary renderer.
+Checklist:
+
+- [x] Implement base URL discovery algorithm.
+- [x] Implement endpoint extraction and parameter merge.
+- [x] Implement request/response/schema summary renderer.
 
 Exit criteria:
 
-1. Base URL discovery succeeds on representative defaults.
-2. Endpoint summaries are complete and readable.
+- [x] Base URL discovery succeeds on representative defaults.
+- [x] Endpoint summaries are complete and readable.
 
 ## Phase 4: TUI
 
-1. Implement app state and event loop.
-2. Implement left pane searchable list.
-3. Implement right pane detail rendering + scrolling.
-4. Add cache/offline status indicators.
+Checklist:
+
+- [x] Implement app state and event loop.
+- [x] Implement left pane searchable list.
+- [x] Implement right pane detail rendering + scrolling.
+- [x] Add cache/offline status indicators.
+- [x] Add non-TUI fallback mode (`--no-tui`) for safe diagnostics.
+- [x] Add terminal compatibility flags (`--no-alt-screen`, `APISPEC_NO_ALT_SCREEN`).
+- [x] Fix long-token wrapping freeze in detail renderer.
 
 Exit criteria:
 
-1. Keyboard-only navigation complete.
-2. UI remains responsive on large specs.
+- [x] Keyboard-only navigation complete.
+- [x] UI remains responsive on representative large specs (validated with 210-endpoint spec and wrapping fix).
 
 ## Phase 5: Hardening and release quality
 
-1. Add unit and integration tests.
-2. Add snapshot tests for schema summary output.
-3. Run `fmt`, `clippy`, `test`.
-4. Add README usage examples and error behavior doc.
+Checklist:
+
+- [x] Add unit and integration tests (core coverage in place for classify/discover/fetch/cache/load/index/render/tui state).
+- [ ] Add snapshot tests for schema summary output.
+- [ ] Run `fmt`, `clippy`, `test` as final release gate (`fmt`/`test` running; `clippy` still pending as a gate).
+- [ ] Add README usage examples and error behavior doc.
 
 Exit criteria:
 
-1. Test suite green.
-2. No clippy warnings in project code.
-3. Clear docs for normal and offline usage.
+- [x] Test suite green.
+- [ ] No clippy warnings in project code.
+- [ ] Clear docs for normal and offline usage.
 
 ---
 

@@ -12,4 +12,16 @@ pub struct Cli {
         help = "Local spec file path, direct spec URL, or base API URL."
     )]
     pub source: String,
+
+    #[arg(
+        long = "no-tui",
+        help = "Disable interactive UI and print endpoint summary to stdout."
+    )]
+    pub no_tui: bool,
+
+    #[arg(
+        long = "no-alt-screen",
+        help = "Run TUI without entering the terminal alternate screen."
+    )]
+    pub no_alt_screen: bool,
 }

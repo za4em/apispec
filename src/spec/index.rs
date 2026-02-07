@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use oas3::spec::{
     ObjectOrReference, Operation, Parameter, ParameterIn, PathItem, RequestBody, Response, Spec,
@@ -70,7 +70,8 @@ pub fn build_endpoint_index(spec: &Spec) -> Vec<EndpointSummary> {
     };
 
     for (path, path_item) in paths {
-        for (method, operation) in operations_in_order(path_item) {
+        let resolved_path_item = resolve_path_item(path_item, spec);
+        for (method, operation) in operations_in_order(&resolved_path_item) {
             let title = operation
                 .summary
                 .clone()
@@ -83,7 +84,7 @@ pub fn build_endpoint_index(spec: &Spec) -> Vec<EndpointSummary> {
                 title: title.clone(),
                 description: operation.description.clone(),
                 operation_id: operation.operation_id.clone(),
-                grouped_parameters: merge_parameters(path_item, operation, spec),
+                grouped_parameters: merge_parameters(&resolved_path_item, operation, spec),
                 request_body: build_request_body_view(operation.request_body.as_ref(), spec),
                 responses: build_response_views(operation.responses.as_ref(), spec),
                 search_text: build_search_text(
@@ -128,6 +129,54 @@ fn operations_in_order(path_item: &PathItem) -> Vec<(&'static str, &Operation)> 
     push!(head, "HEAD");
     push!(trace, "TRACE");
     operations
+}
+
+fn resolve_path_item(path_item: &PathItem, spec: &Spec) -> PathItem {
+    let mut visited = HashSet::new();
+    resolve_path_item_inner(path_item, spec, &mut visited).unwrap_or_else(|| path_item.clone())
+}
+
+fn resolve_path_item_inner(
+    path_item: &PathItem,
+    spec: &Spec,
+    visited: &mut HashSet<String>,
+) -> Option<PathItem> {
+    let Some(reference) = path_item.reference.as_deref() else {
+        return Some(path_item.clone());
+    };
+
+    resolve_path_item_reference(reference, spec, visited).or_else(|| Some(path_item.clone()))
+}
+
+fn resolve_path_item_reference(
+    reference: &str,
+    spec: &Spec,
+    visited: &mut HashSet<String>,
+) -> Option<PathItem> {
+    if !visited.insert(reference.to_owned()) {
+        return None;
+    }
+
+    let result = (|| {
+        let name = decode_json_pointer_token(reference.strip_prefix("#/components/pathItems/")?);
+        let components = spec.components.as_ref()?;
+        let path_item_ref = components.path_items.get(&name)?;
+        match path_item_ref {
+            ObjectOrReference::Object(path_item) => {
+                resolve_path_item_inner(path_item, spec, visited)
+            }
+            ObjectOrReference::Ref { ref_path, .. } => {
+                resolve_path_item_reference(ref_path, spec, visited)
+            }
+        }
+    })();
+
+    visited.remove(reference);
+    result
+}
+
+fn decode_json_pointer_token(token: &str) -> String {
+    token.replace("~1", "/").replace("~0", "~")
 }
 
 fn method_rank(method: &str) -> usize {
@@ -436,5 +485,63 @@ paths:
             endpoint.responses[0].unresolved_ref.as_deref(),
             Some("#/components/responses/Missing")
         );
+    }
+
+    #[test]
+    fn resolves_path_item_component_references() {
+        let spec = parse_spec(
+            r##"
+openapi: 3.1.0
+info:
+  title: demo
+  version: 1.0.0
+paths:
+  /pets:
+    $ref: "#/components/pathItems/PetsPath"
+components:
+  pathItems:
+    PetsPath:
+      get:
+        summary: list pets
+        responses:
+          "200":
+            description: ok
+"##,
+        );
+
+        let endpoints = build_endpoint_index(&spec);
+        assert_eq!(endpoints.len(), 1);
+        assert_eq!(endpoints[0].path, "/pets");
+        assert_eq!(endpoints[0].method, "GET");
+    }
+
+    #[test]
+    fn resolves_nested_path_item_component_references() {
+        let spec = parse_spec(
+            r##"
+openapi: 3.1.0
+info:
+  title: demo
+  version: 1.0.0
+paths:
+  /pets:
+    $ref: "#/components/pathItems/First"
+components:
+  pathItems:
+    First:
+      $ref: "#/components/pathItems/Second"
+    Second:
+      post:
+        summary: create pet
+        responses:
+          "201":
+            description: created
+"##,
+        );
+
+        let endpoints = build_endpoint_index(&spec);
+        assert_eq!(endpoints.len(), 1);
+        assert_eq!(endpoints[0].path, "/pets");
+        assert_eq!(endpoints[0].method, "POST");
     }
 }
