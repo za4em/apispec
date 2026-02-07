@@ -441,15 +441,15 @@ Exit criteria:
 Checklist:
 
 - [x] Add unit and integration tests (core coverage in place for classify/discover/fetch/cache/load/index/render/tui state).
-- [ ] Add snapshot tests for schema summary output.
-- [ ] Run `fmt`, `clippy`, `test` as final release gate (`fmt`/`test` running; `clippy` still pending as a gate).
-- [ ] Add README usage examples and error behavior doc.
+- [x] Add snapshot tests for schema summary output.
+- [x] Run `fmt`, `clippy`, `test` as final release gate (`fmt`/`test`/`clippy` all passing with strict warnings gate).
+- [x] Add README usage examples and error behavior doc.
 
 Exit criteria:
 
 - [x] Test suite green.
-- [ ] No clippy warnings in project code.
-- [ ] Clear docs for normal and offline usage.
+- [x] No clippy warnings in project code.
+- [x] Clear docs for normal and offline usage.
 
 ---
 
@@ -570,21 +570,21 @@ Exit criteria:
 
 ### Phase 4: TUI
 
-- [ ] Implement interactive terminal app loop and key handling.
-- [ ] Implement searchable endpoint list pane.
-- [ ] Implement endpoint detail pane with concise schema display.
-- [ ] Surface cache/offline status in UI chrome.
+- [x] Implement interactive terminal app loop and key handling.
+- [x] Implement searchable endpoint list pane.
+- [x] Implement endpoint detail pane with concise schema display.
+- [x] Surface cache/offline status in UI chrome.
 
 ### Phase 5: Hardening and release quality
 
-- [ ] Expand unit/integration coverage for cache/discovery/validation.
-- [ ] Add snapshot-style tests for schema rendering.
-- [ ] Run and clean `fmt`/`clippy`/`test`.
-- [ ] Finalize user-facing docs and usage examples.
+- [x] Expand unit/integration coverage for cache/discovery/validation.
+- [x] Add snapshot-style tests for schema rendering.
+- [x] Run and clean `fmt`/`clippy`/`test`.
+- [x] Finalize user-facing docs and usage examples.
 
 ---
 
-## 17. Session Handoff Notes (After Phase 3)
+## 17. Session Handoff Notes (After Phase 5)
 
 Use this section when resuming after context reset.
 
@@ -598,6 +598,8 @@ Use this section when resuming after context reset.
    3. Endpoint indexing with deterministic path/method sorting.
    4. Parameter merge and grouping with operation-level override.
    5. Request/response/media type rendering and schema summaries with depth/node limits, cycle detection, and unresolved-ref placeholders.
+4. Phase 4 is complete (interactive TUI, search, detail scrolling/wrapping, status/help bars, no-TUI and no-alt-screen modes).
+5. Phase 5 is complete (expanded test coverage including schema snapshots, strict clippy gate, and README docs).
 
 ### 17.2 Key runtime behavior (as implemented)
 
@@ -654,15 +656,13 @@ Last successful checks:
 
 1. `cargo fmt`
 2. `cargo clippy --all-targets -- -D warnings`
-3. `cargo test` (`30` passing tests)
+3. `cargo test` (`45` passing tests)
 
-### 17.6 Suggested immediate next work (Phase 4)
+### 17.6 Suggested next work (optional)
 
-1. Implement TUI app state and event loop in `src/tui/state.rs` and `src/tui/event.rs`.
-2. Implement keyboard mapping (`h/j/k/l`, arrows, search shortcuts) in `src/tui/keymap.rs`.
-3. Implement split-pane rendering (searchable endpoint list + detail pane) in `src/tui/view.rs`.
-4. Add status/help bars with cache/offline indicators and key hints.
-5. Connect indexed endpoint/search data from `spec/index.rs` into TUI interaction state.
+1. Add CI workflow that enforces `fmt`, strict `clippy`, and `test` on pull requests.
+2. Add larger-spec benchmarks to track startup/search/render latency targets.
+3. Add optional export formats for `--no-tui` output (for scripting/reporting workflows).
 
 ### 17.7 Guardrails to keep
 

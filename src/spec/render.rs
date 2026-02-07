@@ -398,4 +398,152 @@ paths: {}
 
         assert!(summary.contains("unresolved"));
     }
+
+    #[test]
+    fn snapshot_summary_for_object_with_nested_structures() {
+        let spec = parse_spec(
+            r##"
+openapi: 3.1.0
+info:
+  title: demo
+  version: 1.0.0
+paths: {}
+components:
+  schemas:
+    User:
+      type: object
+      required: [id, name]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        profile:
+          type: object
+          properties:
+            age:
+              type: integer
+            email:
+              type: string
+              format: email
+        tags:
+          type: array
+          items:
+            type: string
+"##,
+        );
+
+        let schema_ref = ObjectOrReference::Ref {
+            ref_path: "#/components/schemas/User".to_owned(),
+            summary: None,
+            description: None,
+        };
+        let summary = summarize_schema(&schema_ref, &spec);
+        assert_eq!(
+            summary,
+            include_str!("snapshots/schema_object_nested.snap").trim_end()
+        );
+    }
+
+    #[test]
+    fn snapshot_summary_for_cyclic_schema() {
+        let spec = parse_spec(
+            r##"
+openapi: 3.1.0
+info:
+  title: demo
+  version: 1.0.0
+paths: {}
+components:
+  schemas:
+    Node:
+      type: object
+      properties:
+        next:
+          $ref: "#/components/schemas/Node"
+"##,
+        );
+
+        let schema_ref = ObjectOrReference::Ref {
+            ref_path: "#/components/schemas/Node".to_owned(),
+            summary: None,
+            description: None,
+        };
+        let summary = summarize_schema(&schema_ref, &spec);
+        assert_eq!(
+            summary,
+            include_str!("snapshots/schema_cycle.snap").trim_end()
+        );
+    }
+
+    #[test]
+    fn snapshot_summary_for_property_cutoff() {
+        let spec = parse_spec(
+            r#"
+openapi: 3.1.0
+info:
+  title: demo
+  version: 1.0.0
+paths: {}
+components:
+  schemas:
+    LargeObject:
+      type: object
+      required: [id, code]
+      properties:
+        id:
+          type: string
+        code:
+          type: integer
+        alpha:
+          type: string
+        beta:
+          type: string
+        delta:
+          type: string
+        epsilon:
+          type: string
+        gamma:
+          type: string
+        zeta:
+          type: string
+"#,
+        );
+
+        let schema_ref = ObjectOrReference::Ref {
+            ref_path: "#/components/schemas/LargeObject".to_owned(),
+            summary: None,
+            description: None,
+        };
+        let summary = summarize_schema(&schema_ref, &spec);
+        assert_eq!(
+            summary,
+            include_str!("snapshots/schema_property_cutoff.snap").trim_end()
+        );
+    }
+
+    #[test]
+    fn snapshot_summary_for_unresolved_reference() {
+        let spec = parse_spec(
+            r#"
+openapi: 3.1.0
+info:
+  title: demo
+  version: 1.0.0
+paths: {}
+"#,
+        );
+
+        let schema_ref = ObjectOrReference::Ref {
+            ref_path: "#/components/schemas/Missing".to_owned(),
+            summary: None,
+            description: None,
+        };
+        let summary = summarize_schema(&schema_ref, &spec);
+        assert_eq!(
+            summary,
+            include_str!("snapshots/schema_unresolved_ref.snap").trim_end()
+        );
+    }
 }

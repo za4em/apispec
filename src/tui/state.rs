@@ -527,10 +527,9 @@ fn push_wrapped_line(lines: &mut Vec<String>, line: &str, width: usize, continua
 fn split_index_for_width(value: &str, width: usize) -> usize {
     let mut last_space = None;
     let mut fallback_index = value.len();
-    let mut char_count = 0usize;
     let mut first_non_whitespace = value.len();
 
-    for (idx, ch) in value.char_indices() {
+    for (char_count, (idx, ch)) in value.char_indices().enumerate() {
         if !ch.is_whitespace() && first_non_whitespace == value.len() {
             first_non_whitespace = idx;
         }
@@ -545,20 +544,16 @@ fn split_index_for_width(value: &str, width: usize) -> usize {
         if ch.is_whitespace() && idx >= first_non_whitespace {
             last_space = Some(idx);
         }
-
-        char_count += 1;
     }
 
     last_space.filter(|idx| *idx > 0).unwrap_or(fallback_index)
 }
 
 fn hard_split_index(value: &str, width: usize) -> usize {
-    let mut char_count = 0usize;
-    for (idx, _) in value.char_indices() {
+    for (char_count, (idx, _)) in value.char_indices().enumerate() {
         if char_count >= width {
             return idx;
         }
-        char_count += 1;
     }
     value.len()
 }
