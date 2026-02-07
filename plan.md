@@ -362,6 +362,8 @@ Files:
 
 Deliverable: final UX with explicit focus indicators and scannable details.
 
+Status: Done (implemented in this session).
+
 ### Phase 5: Docs and polish
 
 Files:
@@ -485,13 +487,13 @@ Use this as a resumable execution checklist after clearing context.
 
 ### Phase 4: Rendering integration
 
-- [ ] Replace flat list render with tree render in `src/tui/view.rs`.
-- [ ] Add focused vs unfocused panel visual styling.
-- [ ] Render details as structured sections instead of plain wrapped text dump.
-- [ ] Implement parameter table-like layout and response status badge styling.
-- [ ] Render expandable schema blocks and active detail-row highlight.
-- [ ] Validate behavior manually with a large spec (200+ endpoints).
-- [ ] Run `cargo test`.
+- [x] Replace flat list render with tree render in `src/tui/view.rs`.
+- [x] Add focused vs unfocused panel visual styling.
+- [x] Render details as structured sections instead of plain wrapped text dump.
+- [x] Implement parameter table-like layout and response status badge styling.
+- [x] Render expandable schema blocks and active detail-row highlight.
+- [x] Validate behavior manually with a large spec (200+ endpoints).
+- [x] Run `cargo test`.
 
 ### Phase 5: Docs and polish
 

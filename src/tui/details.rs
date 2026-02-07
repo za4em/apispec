@@ -76,13 +76,15 @@ impl DetailsDocument {
     }
 
     pub fn breadcrumb_for_line(&self, line_index: usize) -> Option<&str> {
-        self.rows
-            .iter()
-            .find(|row| {
-                let row_end = row.line_start.saturating_add(row.line_len.max(1));
-                line_index >= row.line_start && line_index < row_end
-            })
+        self.row_for_line(line_index)
             .and_then(|row| row.breadcrumb.as_deref())
+    }
+
+    pub fn row_for_line(&self, line_index: usize) -> Option<&DetailRow> {
+        self.rows.iter().find(|row| {
+            let row_end = row.line_start.saturating_add(row.line_len.max(1));
+            line_index >= row.line_start && line_index < row_end
+        })
     }
 
     pub fn row_index_by_id(&self, row_id: &str) -> Option<usize> {

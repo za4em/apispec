@@ -369,6 +369,14 @@ impl AppState {
         self.details_state.active_breadcrumb.as_deref()
     }
 
+    pub fn active_detail_row_span(&mut self, detail_width: u16) -> Option<(usize, usize)> {
+        self.details_state.last_detail_width = detail_width.max(MIN_DETAIL_WIDTH);
+        let current_scroll = self.detail_scroll;
+        self.detail_document_for_selected(detail_width)
+            .and_then(|document| document.row_for_line(current_scroll))
+            .map(|row| (row.line_start, row.line_len.max(1)))
+    }
+
     pub fn status_line(&self) -> String {
         let source_state = match self.context.cache_state {
             CacheState::Fresh => "Source: fresh".to_owned(),
