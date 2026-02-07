@@ -551,9 +551,9 @@ Exit criteria:
 
 ### Phase 3: Discovery and indexing
 
-- [ ] Implement base URL discovery algorithm and candidate probing.
-- [ ] Build endpoint index and parameter grouping/merge logic.
-- [ ] Implement request/response/schema summary rendering.
+- [x] Implement base URL discovery algorithm and candidate probing.
+- [x] Build endpoint index and parameter grouping/merge logic.
+- [x] Implement request/response/schema summary rendering.
 
 ### Phase 4: TUI
 
@@ -571,20 +571,20 @@ Exit criteria:
 
 ---
 
-## 17. Session Handoff Notes (After Phase 2)
+## 17. Session Handoff Notes (After Phase 3)
 
 Use this section when resuming after context reset.
 
 ### 17.1 Current implementation status
 
 1. Phase 1 is complete.
-2. Phase 2 is complete for:
-   1. Local file load + cache refresh.
-   2. Direct spec URL load + cache refresh.
-   3. Conditional HTTP fetch (`ETag` / `If-Modified-Since`).
-   4. Offline fallback to cached spec when network is unavailable.
-   5. Strict OpenAPI version gate: exact `3.1.0` only.
-3. Base URL discovery (`apispec https://api.example.com`) is intentionally not implemented yet and currently fails with a clear Phase 2 message.
+2. Phase 2 is complete.
+3. Phase 3 is complete for:
+   1. Base URL discovery (`service-desc` header, HTML link hints, script URL hints, candidate probing).
+   2. Base URL loader integration with existing cache/offline behavior.
+   3. Endpoint indexing with deterministic path/method sorting.
+   4. Parameter merge and grouping with operation-level override.
+   5. Request/response/media type rendering and schema summaries with depth/node limits, cycle detection, and unresolved-ref placeholders.
 
 ### 17.2 Key runtime behavior (as implemented)
 
@@ -600,21 +600,30 @@ Use this section when resuming after context reset.
    5. Network unavailable:
       1. With cache -> load cache (`OfflineStale`).
       2. Without cache -> fail with `OfflineNoCache`.
-3. CLI currently prints:
+3. `apispec <base-url>`:
+   1. Tries discovery via `service-desc` hints and common framework defaults.
+   2. Validates discovered candidates as strict OpenAPI `3.1.0`.
+   3. Uses discovered URL for fetch/conditional refresh.
+   4. Falls back to cached copy on network failure when cache exists.
+4. CLI currently prints:
    1. Resolved source kind.
    2. Resolved spec source.
    3. Loaded OpenAPI version.
    4. Cache state + timestamp (when available).
+   5. Indexed endpoint count.
 
 ### 17.3 Important code locations
 
-1. Loader orchestration: `src/spec/load.rs`.
-2. Strict parse/validate logic: `src/spec/validate.rs`.
-3. HTTP fetch + conditional headers: `src/source/fetch.rs`.
-4. Cache metadata/state model: `src/cache/metadata.rs`.
-5. Cache store implementation: `src/cache/store.rs`.
-6. Error surface/messages: `src/error.rs`.
-7. CLI output integration: `src/app.rs`.
+1. Loader orchestration + base URL discovery integration: `src/spec/load.rs`.
+2. Discovery implementation: `src/source/discover.rs`.
+3. Strict parse/validate logic: `src/spec/validate.rs`.
+4. HTTP fetch + conditional headers: `src/source/fetch.rs`.
+5. Endpoint indexing and grouping: `src/spec/index.rs`.
+6. Schema and media rendering summaries: `src/spec/render.rs`.
+7. Cache metadata/state model: `src/cache/metadata.rs`.
+8. Cache store implementation: `src/cache/store.rs`.
+9. Error surface/messages: `src/error.rs`.
+10. CLI output integration: `src/app.rs`.
 
 ### 17.4 Cache and environment notes
 
@@ -631,22 +640,16 @@ Use this section when resuming after context reset.
 Last successful checks:
 
 1. `cargo fmt`
-2. `cargo clippy --all-targets --all-features -- -D warnings`
-3. `cargo test` (`17` passing tests)
+2. `cargo clippy --all-targets -- -D warnings`
+3. `cargo test` (`30` passing tests)
 
-### 17.6 Suggested immediate next work (Phase 3)
+### 17.6 Suggested immediate next work (Phase 4)
 
-1. Implement base URL discovery in `src/source/discover.rs`:
-   1. `service-desc` link/header parsing.
-   2. Candidate endpoint probing (`/openapi.json`, `/v3/api-docs`, etc.).
-2. Integrate discovery into `load_spec_for_source` for `SourceKind::BaseUrl`.
-3. Build endpoint index and render summaries in:
-   1. `src/spec/index.rs`
-   2. `src/spec/render.rs`
-4. Add discovery integration tests using `httpmock`:
-   1. `service-desc` success path.
-   2. Candidate probing success path.
-   3. Full failure with attempted URL list in error text.
+1. Implement TUI app state and event loop in `src/tui/state.rs` and `src/tui/event.rs`.
+2. Implement keyboard mapping (`h/j/k/l`, arrows, search shortcuts) in `src/tui/keymap.rs`.
+3. Implement split-pane rendering (searchable endpoint list + detail pane) in `src/tui/view.rs`.
+4. Add status/help bars with cache/offline indicators and key hints.
+5. Connect indexed endpoint/search data from `spec/index.rs` into TUI interaction state.
 
 ### 17.7 Guardrails to keep
 

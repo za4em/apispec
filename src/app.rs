@@ -1,6 +1,7 @@
 use crate::cli::Cli;
 use crate::error::AppError;
 use crate::source::classify_source;
+use crate::spec::index::build_endpoint_index;
 use crate::spec::load::load_spec_for_source;
 
 pub fn run(cli: Cli) -> Result<(), AppError> {
@@ -15,6 +16,8 @@ pub fn run(cli: Cli) -> Result<(), AppError> {
     } else {
         println!("Source: {}", loaded_spec.cache_state);
     }
+    let endpoints = build_endpoint_index(&loaded_spec.spec);
+    println!("Indexed endpoints: {}", endpoints.len());
 
     Ok(())
 }

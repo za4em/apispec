@@ -36,9 +36,9 @@ pub enum AppError {
     },
 
     #[error(
-        "Base API URL discovery for `{input}` is not implemented in Phase 2. Pass a direct spec URL or local file."
+        "Could not discover an OpenAPI spec from base URL `{base_url}`.\nTried: {attempted}.\nIf your spec lives elsewhere, pass it directly: apispec <full-spec-url>."
     )]
-    BaseUrlDiscoveryNotImplemented { input: String },
+    DiscoveryFailed { base_url: String, attempted: String },
 
     #[error("Could not determine a cache directory on this system.")]
     CacheDirUnavailable,

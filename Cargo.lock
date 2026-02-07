@@ -79,6 +79,7 @@ dependencies = [
  "directories",
  "httpmock",
  "oas3",
+ "regex",
  "reqwest",
  "serde",
  "serde_json",
