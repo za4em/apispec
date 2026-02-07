@@ -870,4 +870,67 @@ paths:
                 .is_some_and(|breadcrumb| breadcrumb.contains("id"))
         );
     }
+
+    #[test]
+    fn handles_empty_specs_without_focus_or_selection_panics() {
+        let spec = parse_spec(
+            r#"
+openapi: 3.1.0
+info:
+  title: demo
+  version: 1.0.0
+paths: {}
+"#,
+        );
+        let endpoints = build_endpoint_index(&spec);
+        let mut state = AppState::new(demo_context(), endpoints);
+
+        assert_eq!(state.endpoint_count(), 0);
+        assert_eq!(state.filtered_count(), 0);
+        assert!(state.tree_rows().is_empty());
+        assert_eq!(state.selected_tree_row_index(), None);
+        assert_eq!(
+            state.detail_lines_for_selected(80),
+            ["No endpoints match the current filter."]
+        );
+
+        assert!(!state.activate_selected_tree_row());
+        state.focus_details_panel();
+        assert_eq!(state.focus_panel(), FocusPanel::Tree);
+    }
+
+    #[test]
+    fn returns_focus_to_tree_when_filter_hides_all_endpoints() {
+        let spec = parse_spec(
+            r#"
+openapi: 3.1.0
+info:
+  title: demo
+  version: 1.0.0
+paths:
+  /pets:
+    get:
+      responses:
+        "200":
+          description: ok
+"#,
+        );
+        let endpoints = build_endpoint_index(&spec);
+        let mut state = AppState::new(demo_context(), endpoints);
+
+        assert!(state.activate_selected_tree_row());
+        state.focus_details_panel();
+        assert_eq!(state.focus_panel(), FocusPanel::Details);
+
+        for ch in "missing".chars() {
+            state.push_search_char(ch);
+        }
+
+        assert_eq!(state.focus_panel(), FocusPanel::Tree);
+        assert_eq!(state.filtered_count(), 0);
+        assert_eq!(
+            state.detail_lines_for_selected(80),
+            ["No endpoints match the current filter."]
+        );
+    }
 }

@@ -509,4 +509,63 @@ components:
                 .any(|child| child.label.starts_with("oneOf["))
         );
     }
+
+    #[test]
+    fn supports_deeply_nested_object_schemas() {
+        let spec = parse_spec(
+            r##"
+openapi: 3.1.0
+info:
+  title: demo
+  version: 1.0.0
+paths: {}
+components:
+  schemas:
+    Deep:
+      type: object
+      properties:
+        level1:
+          type: object
+          properties:
+            level2:
+              type: object
+              properties:
+                level3:
+                  type: object
+                  properties:
+                    leaf:
+                      type: string
+"##,
+        );
+
+        let schema_ref = ObjectOrReference::Ref {
+            ref_path: "#/components/schemas/Deep".to_owned(),
+            summary: None,
+            description: None,
+        };
+
+        let root = build_schema_tree(&schema_ref, &spec, "schema");
+        let level1 = root
+            .children
+            .iter()
+            .find(|child| child.label == "level1")
+            .expect("level1 child missing");
+        let level2 = level1
+            .children
+            .iter()
+            .find(|child| child.label == "level2")
+            .expect("level2 child missing");
+        let level3 = level2
+            .children
+            .iter()
+            .find(|child| child.label == "level3")
+            .expect("level3 child missing");
+        let leaf = level3
+            .children
+            .iter()
+            .find(|child| child.label == "leaf")
+            .expect("leaf child missing");
+
+        assert_eq!(leaf.type_label, "string");
+    }
 }

@@ -346,4 +346,67 @@ paths:
         assert_eq!(tree.rows_visible[0].group_label, "users");
         assert!(matches!(tree.rows_visible[1].kind, TreeRowKind::Endpoint));
     }
+
+    #[test]
+    fn filter_with_no_matches_returns_empty_projection() {
+        let spec = parse_spec(
+            r#"
+openapi: 3.1.0
+info:
+  title: demo
+  version: 1.0.0
+paths:
+  /pets:
+    get:
+      tags: ["animals"]
+      responses:
+        "200":
+          description: ok
+"#,
+        );
+        let endpoints = build_endpoint_index(&spec);
+        let mut tree = TreeModel::new(&endpoints);
+
+        tree.rebuild_visible_rows(&endpoints, "does-not-exist");
+
+        assert!(tree.filter_active());
+        assert!(tree.rows_visible.is_empty());
+        assert_eq!(tree.filtered_endpoint_count(), 0);
+    }
+
+    #[test]
+    fn handles_large_endpoint_collections() {
+        let mut yaml = String::from(
+            r#"
+openapi: 3.1.0
+info:
+  title: large-demo
+  version: 1.0.0
+paths:
+"#,
+        );
+        for index in 0..300 {
+            yaml.push_str(&format!(
+                "  /items/{index}:\n    get:\n      tags: [\"group{}\"]\n      responses:\n        \"200\":\n          description: ok\n",
+                index % 12
+            ));
+        }
+
+        let spec = parse_spec(&yaml);
+        let endpoints = build_endpoint_index(&spec);
+        let mut tree = TreeModel::new(&endpoints);
+
+        assert_eq!(endpoints.len(), 300);
+        assert_eq!(tree.filtered_endpoint_count(), 300);
+
+        tree.rebuild_visible_rows(&endpoints, "group3");
+        assert!(tree.filter_active());
+        assert!(tree.filtered_endpoint_count() > 0);
+        assert!(tree.filtered_endpoint_count() < 300);
+        assert!(
+            tree.rows_visible
+                .iter()
+                .any(|row| matches!(row.kind, TreeRowKind::Group))
+        );
+    }
 }

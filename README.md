@@ -94,22 +94,77 @@ Example:
 Unsupported OpenAPI version `3.1.1`. This tool currently supports only `3.1.0`.
 ```
 
+## Endpoint Tree and Grouping
+
+The left panel is a tree:
+- Top-level rows are groups.
+- Child rows are endpoints (`METHOD path` with optional summary text).
+
+Grouping rules:
+- First non-empty operation tag.
+- If no tags, first meaningful path segment (skips `/` and `{param}`-only segments).
+- If still unavailable, `Untagged`.
+
+Ordering:
+- Groups are alphabetical (case-insensitive) with `Untagged` forced last.
+- Endpoints are ordered by path, then method rank (`GET`, `POST`, `PUT`, `PATCH`, `DELETE`, `OPTIONS`, `HEAD`, `TRACE`).
+
+Filtering:
+- Search is case-insensitive and token-based.
+- Matches include group name, method, path, title/summary, operationId, description, and tags.
+- While filtering is active, only matching groups/endpoints are shown and matching groups auto-expand.
+
 ## Keyboard Controls
 
-Normal mode:
-- `j` / `k` or Down / Up: move selection
-- `g` / `G`: first / last endpoint
-- `PageUp` / `PageDown`: jump
-- `h` / `l` or Left / Right: detail scroll
+Normal mode global:
+- `q` or `Ctrl+c`: quit
 - `/` or `Ctrl+s`: enter search mode
-- `Ctrl+u`: clear filter
-- `q`: quit
+- `Ctrl+u`: clear search filter
+
+Tree focus (left panel):
+- `j` / `k` or Down / Up: move row selection
+- `g` / `G`: first / last visible row
+- `PageUp` / `PageDown`: jump by page
+- Left / Right: collapse/expand selected group (disabled while filtering)
+- `Enter`:
+  - On group row: toggle expand/collapse
+  - On endpoint row: open endpoint details and switch focus to details panel
+
+Details focus (right panel):
+- `j` / `k` or Down / Up: scroll details
+- `h` / `l` or Left / Right: alternate detail scroll keys
+- `PageUp` / `PageDown`: scroll by page
+- `Tab`: jump to next section (`Description`, `Parameters`, `Request Body`, `Responses`, `Security`)
+- `Enter`: toggle nearest expandable detail row
+- `Esc`: return focus to tree panel
 
 Search mode:
-- Type to filter by method/path/summary/operationId
-- `Backspace`: delete
+- Type to update filter immediately
+- `Backspace`: delete one character
 - `Ctrl+u`: clear query
 - `Enter` or `Esc`: return to normal mode
+
+## Details and Expansion Behavior
+
+The details panel is sectioned and styled for scanability:
+- Header: `METHOD path` (method-colored)
+- Sections: Description, Parameters, Request Body, Responses, Security
+- Parameters are rendered in a table-like row format: name, location, required, type, description
+- Response rows style status codes by class (`2xx`, `4xx`, `5xx`, etc.)
+
+Expandable rows in details:
+- Request body block
+- Request body media types (for example `application/json`)
+- Each response status block (for example `200`)
+- Response media types
+- Nested schema nodes that have children
+
+Schema rendering includes:
+- Type labels and required markers
+- Enum values and compact examples when available
+- Reference hints (`[ref:Name]`)
+- Safe placeholders for cycles and unresolved refs
+- Breadcrumb line at the top of details when focused
 
 ## Error Behavior
 

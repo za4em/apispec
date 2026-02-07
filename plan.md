@@ -375,6 +375,8 @@ Files:
 
 Deliverable: docs aligned with final keyboard model and behavior.
 
+Status: Done (implemented in this session).
+
 ---
 
 ## 12. Test Strategy
@@ -451,19 +453,19 @@ Use this as a resumable execution checklist after clearing context.
 
 ### Pre-flight
 
-- [ ] Re-read `prompt.txt` requirements and non-goals.
-- [ ] Re-read this `plan.md` and confirm scope is unchanged.
-- [ ] Run `git status --short` and note unrelated local changes.
-- [ ] Run `cargo test` to capture baseline failures (if any) before edits.
+- [x] Re-read `prompt.txt` requirements and non-goals.
+- [x] Re-read this `plan.md` and confirm scope is unchanged.
+- [x] Run `git status --short` and note unrelated local changes.
+- [x] Run `cargo test` to capture baseline failures (if any) before edits.
 
 ### Phase 1: Data/index foundation
 
-- [ ] Extend `EndpointSummary` with `tags`, `group_key`, `group_sort_key`.
-- [ ] Implement group-key derivation: first tag -> first path segment -> `Untagged`.
-- [ ] Expand search text to include tags/group metadata.
-- [ ] Add deterministic group and endpoint ordering helpers.
-- [ ] Add/refresh unit tests in `src/spec/index.rs` for grouping fallback and ordering.
-- [ ] Run `cargo test` and fix regressions before moving on.
+- [x] Extend `EndpointSummary` with `tags`, `group_key`, `group_sort_key`.
+- [x] Implement group-key derivation: first tag -> first path segment -> `Untagged`.
+- [x] Expand search text to include tags/group metadata.
+- [x] Add deterministic group and endpoint ordering helpers.
+- [x] Add/refresh unit tests in `src/spec/index.rs` for grouping fallback and ordering.
+- [x] Run `cargo test` and fix regressions before moving on.
 
 ### Phase 2: Tree model and state machine
 
@@ -497,16 +499,16 @@ Use this as a resumable execution checklist after clearing context.
 
 ### Phase 5: Docs and polish
 
-- [ ] Update `README.md` grouping behavior docs.
-- [ ] Update `README.md` keybindings for tree focus vs details focus.
-- [ ] Update `README.md` expand/collapse behavior for bodies/schemas.
-- [ ] Add any missing regression tests discovered during manual QA.
-- [ ] Run `cargo test` and ensure green.
+- [x] Update `README.md` grouping behavior docs.
+- [x] Update `README.md` keybindings for tree focus vs details focus.
+- [x] Update `README.md` expand/collapse behavior for bodies/schemas.
+- [x] Add any missing regression tests discovered during manual QA.
+- [x] Run `cargo test` and ensure green.
 
 ### Final acceptance gate
 
-- [ ] No crashes on missing tags/schemas/unresolved refs.
-- [ ] Tree filtering and expansion remains responsive on large specs.
-- [ ] Keyboard navigation is consistent and matches README.
-- [ ] Details are visually scannable and schema navigation is usable.
-- [ ] `git diff` only contains intentional changes.
+- [x] No crashes on missing tags/schemas/unresolved refs.
+- [x] Tree filtering and expansion remains responsive on large specs.
+- [x] Keyboard navigation is consistent and matches README.
+- [x] Details are visually scannable and schema navigation is usable.
+- [x] `git diff` only contains intentional changes.
