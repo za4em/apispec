@@ -1,50 +1,98 @@
-You are an expert Rust engineer. Implement a Rust CLI tool named "apispec" that inspects OpenAPI 3.1.0 specs.
+You are improving an existing product called **apispec** (CLI + interactive TUI for exploring OpenAPI 3.1.0 specs). The app already loads specs from file/URL, caches them, and shows a basic two-panel TUI: endpoints list (left) + endpoint details (right).
 
-apispec is a developer tool for exploring and understanding APIs described with **OpenAPI 3.1.0**. It is designed to be fast, simple, and usable without reading documentation.
+Goal: make the TUI usable for large APIs (200+ endpoints) and make details truly readable and navigable.
 
-User experience:
-- The user runs `apispec <source>` from the terminal.
-- `<source>` can be:
-  - a local OpenAPI file
-  - a direct OpenAPI URL
-  - a base API URL (the tool should automatically find the OpenAPI spec)
-- The tool launches an interactive terminal UI where the user can navigate the API.
+FEATURES TO IMPLEMENT
 
-Core behavior:
-- The app loads the OpenAPI specification, stores it locally, and refreshes it on every launch.
-- If the network is unavailable, the app uses the last cached version and clearly indicates this.
-- Only OpenAPI **3.1.0** is supported. Other versions must fail with a clear message.
+1) Endpoint grouping with expandable folders
+- The endpoints list must support hierarchical grouping like Swagger UI folders, similar to a file tree (e.g., nvim neo-tree).
+- Groups are derived from the OpenAPI spec:
+  - Primary grouping: by the first tag on each operation (or “Untagged”).
+  - If tags are missing, group by the first path segment (e.g., "/users/*" => "users").
+- The left panel becomes a tree:
+  - Top level: groups/folders
+  - Children: endpoints (method + path + short label)
+- Groups must be expandable/collapsible.
+- The tree must preserve stable ordering:
+  - Groups alphabetical, with “Untagged” last.
+  - Endpoints ordered by path then method.
+- Search must work with the tree:
+  - Typing filters by group name, endpoint path, operationId, and tags.
+  - When a filter is active, show only matching endpoints and auto-expand groups containing matches.
 
-Interactive UI:
-- Left side: a searchable list of API endpoints.
-- Right side: detailed information for the selected endpoint.
-- Users can move with keyboard only (nvim movement <D-s>and arrows).
-- The UI must feel responsive even for large specs.
+2) Focus + interaction model (left list ↔ right details)
+- The UI must have explicit focus:
+  - Focus state can be "tree" (left) or "details" (right).
+- Keyboard behavior:
+  - In tree focus:
+    - Up/Down moves selection
+    - Right/Enter expands/collapses group OR selects endpoint
+    - Enter on an endpoint switches focus to details panel
+  - In details focus:
+    - Up/Down scrolls details
+    - Tab switches between sections inside details (see below)
+    - Esc returns focus to tree
+- The focused panel should be visually indicated (border style, header highlight, etc).
 
-Information shown:
-- Endpoint method and path
-- Summary and description
-- Parameters (grouped by path, query, header, cookie)
-- Request body formats and schemas
-- Response status codes and schemas
-- Schema details must be readable and concise
+3) Details UI enhancement (not plain text)
+- The right panel must be structured and visually scannable, not a wall of text.
+- Use clear section headers and spacing:
+  - Path + method as a prominent “header”
+  - Summary/description below
+  - Sections with separators/dividers:
+    - Parameters
+    - Request Body
+    - Responses
+    - Security (if present)
+- Add basic styling:
+  - Method colors (GET/POST/etc)
+  - Subtle separators/lines
+  - Indentation and alignment for tables
+  - Badges/labels for content types and status codes
+- Parameters must be displayed as a table-like layout:
+  - columns: name, location, required, type, description
+- Responses list should highlight:
+  - success responses vs error responses
+  - status code + description + content types
 
-Design principles:
-- Fast startup
-- No configuration required
-- Works offline after first load
-- Clear errors, no silent failures
-- Sensible defaults over flexibility
+4) Expandable request/response bodies with readable JSON Schema rendering
+- Request body and each response body must be expandable/collapsible.
+- When expanded, show a readable schema tree (not “array<object{…}>”).
+- The schema view must:
+  - Be fully navigable/scrollable in details focus
+  - Render nested objects and arrays with indentation
+  - Show:
+    - required fields
+    - type(s)
+    - enum values (compact)
+    - descriptions (wrapped)
+    - examples if available (compact)
+  - Resolve internal references where possible (components/schemas), and show reference name when used.
+- UX behavior:
+  - In details focus, Enter toggles expand/collapse on the currently selected expandable item:
+    - Request Body
+    - Individual response codes (e.g., 200, 400)
+    - Specific content-type entries (application/json)
+    - Nested schema nodes (optional but preferred)
+  - Provide a breadcrumb/path or highlight to keep the user oriented inside the schema tree.
 
-Scope boundaries:
-- Read-only exploration (no API calling)
-- No authentication flows
-- No OpenAPI versions other than 3.1.0
+NON-GOALS
+- Do not add API calling, auth flows, or write operations.
+- Do not add support for OpenAPI versions other than 3.1.0.
 
-Deliverable:
-- A complete, working CLI + TUI application implementing the above.
-- Reasonable defaults and a clean UX.
-- Code should be production-quality and maintainable.
+DELIVERABLES
+- Implement the above features end-to-end in the existing codebase.
+- Keep performance acceptable for large specs:
+  - Tree building and filtering must feel instant.
+  - UI must remain responsive while scrolling large schemas.
+- Provide a short update to README describing:
+  - grouping behavior
+  - keybindings (tree focus vs details focus)
+  - expand/collapse behavior for bodies
 
-Do not over-engineer. Focus on usability and correctness.
+QUALITY BAR
+- No crashes on missing tags, missing schemas, or uncommon specs.
+- Clear, consistent keyboard navigation.
+- Visual structure that makes details easy to scan.
+- Maintainable code: do not hack it into a single file; keep logic separated (data model / indexing / rendering / state machine).
 
