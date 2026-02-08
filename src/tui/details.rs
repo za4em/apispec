@@ -1,8 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::spec::index::{EndpointSummary, ParameterView};
+use crate::spec::index::{EndpointSummary, MediaExampleView, ParameterView};
 use crate::spec::schema_tree::SchemaNode;
-use serde_json::Value;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DetailSection {
@@ -10,7 +9,6 @@ pub enum DetailSection {
     Parameters,
     RequestBody,
     Responses,
-    Security,
 }
 
 impl DetailSection {
@@ -19,8 +17,7 @@ impl DetailSection {
             Self::Overview => Self::Parameters,
             Self::Parameters => Self::RequestBody,
             Self::RequestBody => Self::Responses,
-            Self::Responses => Self::Security,
-            Self::Security => Self::Overview,
+            Self::Responses => Self::Overview,
         }
     }
 }
@@ -76,27 +73,33 @@ impl DetailsDocument {
             .and_then(|row_index| self.rows.get(*row_index))
     }
 
-    pub fn previous_row_line_start(&self, line_index: usize, steps: usize) -> Option<usize> {
-        let mut row_index = self.row_index_for_line_or_next(line_index)?;
+    pub fn previous_toggle_line_start(&self, line_index: usize, steps: usize) -> Option<usize> {
+        let mut toggle_index = self.toggle_index_for_line_or_next(line_index)?;
         for _ in 0..steps {
-            if row_index == 0 {
+            if toggle_index == 0 {
                 break;
             }
-            row_index -= 1;
+            toggle_index -= 1;
         }
-        self.rows.get(row_index).map(|row| row.line_start)
+        self.toggle_rows
+            .get(toggle_index)
+            .and_then(|row_index| self.rows.get(*row_index))
+            .map(|row| row.line_start)
     }
 
-    pub fn next_row_line_start(&self, line_index: usize, steps: usize) -> Option<usize> {
-        let mut row_index = self.row_index_for_line_or_next(line_index)?;
+    pub fn next_toggle_line_start(&self, line_index: usize, steps: usize) -> Option<usize> {
+        let mut toggle_index = self.toggle_index_for_line_or_next(line_index)?;
         for _ in 0..steps {
-            let next = row_index.saturating_add(1);
-            if next >= self.rows.len() {
+            let next = toggle_index.saturating_add(1);
+            if next >= self.toggle_rows.len() {
                 break;
             }
-            row_index = next;
+            toggle_index = next;
         }
-        self.rows.get(row_index).map(|row| row.line_start)
+        self.toggle_rows
+            .get(toggle_index)
+            .and_then(|row_index| self.rows.get(*row_index))
+            .map(|row| row.line_start)
     }
 
     pub fn breadcrumb_for_line(&self, line_index: usize) -> Option<&str> {
@@ -115,23 +118,29 @@ impl DetailsDocument {
         self.row_index_by_id.get(row_id).copied()
     }
 
-    fn row_index_for_line_or_next(&self, line_index: usize) -> Option<usize> {
-        if self.rows.is_empty() {
+    fn toggle_index_for_line_or_next(&self, line_index: usize) -> Option<usize> {
+        if self.toggle_rows.is_empty() {
             return None;
         }
 
-        if let Some(found) = self.rows.iter().position(|row| {
-            let row_end = row.line_start.saturating_add(row.line_len.max(1));
-            line_index >= row.line_start && line_index < row_end
+        if let Some(found) = self.toggle_rows.iter().position(|row_index| {
+            self.rows.get(*row_index).is_some_and(|row| {
+                let row_end = row.line_start.saturating_add(row.line_len.max(1));
+                line_index >= row.line_start && line_index < row_end
+            })
         }) {
             return Some(found);
         }
 
-        if let Some(found) = self.rows.iter().position(|row| row.line_start > line_index) {
+        if let Some(found) = self.toggle_rows.iter().position(|row_index| {
+            self.rows
+                .get(*row_index)
+                .is_some_and(|row| row.line_start > line_index)
+        }) {
             return Some(found);
         }
 
-        Some(self.rows.len().saturating_sub(1))
+        Some(self.toggle_rows.len().saturating_sub(1))
     }
 }
 
@@ -222,7 +231,6 @@ pub fn build_details_document(
     render_parameters_section(&mut builder, endpoint);
     render_request_body_section(&mut builder, endpoint, expanded_toggles);
     render_responses_section(&mut builder, endpoint, expanded_toggles);
-    render_security_section(&mut builder);
 
     builder.finish()
 }
@@ -249,28 +257,6 @@ fn render_overview_section(builder: &mut DocumentBuilder, endpoint: &EndpointSum
         );
     }
 
-    if let Some(operation_id) = endpoint.operation_id.as_deref() {
-        builder.push_row(
-            DetailSection::Overview,
-            &format!("Operation ID: {operation_id}"),
-            Some("overview:operation_id".to_owned()),
-            None,
-            None,
-            "  ",
-        );
-    }
-
-    if !endpoint.tags.is_empty() {
-        builder.push_row(
-            DetailSection::Overview,
-            &format!("Tags: {}", endpoint.tags.join(", ")),
-            Some("overview:tags".to_owned()),
-            None,
-            None,
-            "  ",
-        );
-    }
-
     builder.push_section_header(DetailSection::Overview, "Description");
     if let Some(description) = endpoint.description.as_deref() {
         for line in description.lines() {
@@ -285,17 +271,10 @@ fn render_parameters_section(builder: &mut DocumentBuilder, endpoint: &EndpointS
     builder.push_section_header(DetailSection::Parameters, "Parameters");
 
     let mut has_rows = false;
-    for parameter in endpoint
-        .grouped_parameters
-        .path
-        .iter()
-        .chain(endpoint.grouped_parameters.query.iter())
-        .chain(endpoint.grouped_parameters.header.iter())
-        .chain(endpoint.grouped_parameters.cookie.iter())
-    {
-        has_rows = true;
-        render_parameter_row(builder, parameter);
-    }
+    has_rows |= render_parameter_group(builder, "Path", &endpoint.grouped_parameters.path);
+    has_rows |= render_parameter_group(builder, "Query", &endpoint.grouped_parameters.query);
+    has_rows |= render_parameter_group(builder, "Header", &endpoint.grouped_parameters.header);
+    has_rows |= render_parameter_group(builder, "Cookie", &endpoint.grouped_parameters.cookie);
 
     if !has_rows {
         builder.push_row(DetailSection::Parameters, "None", None, None, None, "  ");
@@ -313,24 +292,81 @@ fn render_parameters_section(builder: &mut DocumentBuilder, endpoint: &EndpointS
     }
 }
 
+fn render_parameter_group(
+    builder: &mut DocumentBuilder,
+    label: &str,
+    parameters: &[ParameterView],
+) -> bool {
+    if parameters.is_empty() {
+        return false;
+    }
+
+    builder.push_row(
+        DetailSection::Parameters,
+        &format!("{label} parameters"),
+        None,
+        None,
+        None,
+        "  ",
+    );
+
+    for parameter in parameters {
+        render_parameter_row(builder, parameter);
+    }
+
+    true
+}
+
 fn render_parameter_row(builder: &mut DocumentBuilder, parameter: &ParameterView) {
-    let schema = parameter.schema.as_deref().unwrap_or("any");
-    let required = if parameter.required { "yes" } else { "no" };
-    let description = parameter.description.as_deref().unwrap_or("-");
     builder.push_row(
         DetailSection::Parameters,
         &format!(
-            "  {} | {:<6} | required: {:<3} | {:<16} | {}",
-            trim_to_width(&parameter.name, 24),
-            parameter.location,
-            required,
-            trim_to_width(schema, 20),
-            description
+            "  - {} ({})",
+            parameter.name,
+            if parameter.required {
+                "required"
+            } else {
+                "optional"
+            }
         ),
         None,
         None,
         None,
         "    ",
+    );
+
+    builder.push_row(
+        DetailSection::Parameters,
+        &format!(
+            "    schema: {}",
+            parameter.schema.as_deref().unwrap_or("any")
+        ),
+        None,
+        None,
+        None,
+        "      ",
+    );
+
+    if let Some(description) = parameter.description.as_deref() {
+        if !description.trim().is_empty() {
+            builder.push_row(
+                DetailSection::Parameters,
+                &format!("    description: {description}"),
+                None,
+                None,
+                None,
+                "      ",
+            );
+        }
+    }
+
+    builder.push_row(
+        DetailSection::Parameters,
+        &format!("    in: {}", parameter.location),
+        None,
+        None,
+        None,
+        "      ",
     );
 }
 
@@ -395,34 +431,37 @@ fn render_request_body_section(
     for media in &request_body.media_types {
         let media_toggle = toggle_id(endpoint.id, &format!("request_body:{}", media.content_type));
         let media_expanded = expanded_toggles.contains(&media_toggle);
-        let summary = media.schema.as_deref().unwrap_or("any");
 
         builder.push_row(
             DetailSection::RequestBody,
-            &format!(
-                "  {} {} :: {}",
-                fold_marker(media_expanded),
-                media.content_type,
-                summary
-            ),
+            &format!("  {} {}", fold_marker(media_expanded), media.content_type),
             Some(format!("request_body:{}", media.content_type)),
             Some(media_toggle.clone()),
             None,
             "      ",
         );
 
-        if media_expanded && let Some(schema_root) = media.schema_tree.as_ref() {
-            let mut breadcrumb = vec!["request body".to_owned(), media.content_type.clone()];
+        if media_expanded {
             let schema_context = format!("request_body:{}", media.content_type);
-            render_schema_node(
+            render_schema_subsection(
                 builder,
                 DetailSection::RequestBody,
                 endpoint.id,
                 &schema_context,
-                schema_root,
+                &["request body".to_owned(), media.content_type.clone()],
+                media.schema_tree.as_ref(),
                 expanded_toggles,
                 2,
-                &mut breadcrumb,
+            );
+            render_examples_subsection(
+                builder,
+                DetailSection::RequestBody,
+                endpoint.id,
+                &schema_context,
+                &["request body".to_owned(), media.content_type.clone()],
+                &media.examples,
+                expanded_toggles,
+                2,
             );
         }
     }
@@ -497,16 +536,10 @@ fn render_responses_section(
                 &format!("response:{}:{}", response.status, media.content_type),
             );
             let media_expanded = expanded_toggles.contains(&media_toggle);
-            let summary = media.schema.as_deref().unwrap_or("any");
 
             builder.push_row(
                 DetailSection::Responses,
-                &format!(
-                    "  {} media {} :: {}",
-                    fold_marker(media_expanded),
-                    media.content_type,
-                    summary
-                ),
+                &format!("  {} {}", fold_marker(media_expanded), media.content_type),
                 Some(format!(
                     "response:{}:{}",
                     response.status, media.content_type
@@ -516,37 +549,193 @@ fn render_responses_section(
                 "      ",
             );
 
-            if media_expanded && let Some(schema_root) = media.schema_tree.as_ref() {
-                let mut breadcrumb = vec![
-                    format!("response {}", response.status),
-                    media.content_type.clone(),
-                ];
+            if media_expanded {
                 let schema_context = format!("response:{}:{}", response.status, media.content_type);
-                render_schema_node(
+                render_schema_subsection(
                     builder,
                     DetailSection::Responses,
                     endpoint.id,
                     &schema_context,
-                    schema_root,
+                    &[
+                        format!("response {}", response.status),
+                        media.content_type.clone(),
+                    ],
+                    media.schema_tree.as_ref(),
                     expanded_toggles,
                     2,
-                    &mut breadcrumb,
+                );
+                render_examples_subsection(
+                    builder,
+                    DetailSection::Responses,
+                    endpoint.id,
+                    &schema_context,
+                    &[
+                        format!("response {}", response.status),
+                        media.content_type.clone(),
+                    ],
+                    &media.examples,
+                    expanded_toggles,
+                    2,
                 );
             }
         }
     }
 }
 
-fn render_security_section(builder: &mut DocumentBuilder) {
-    builder.push_section_header(DetailSection::Security, "Security");
+fn render_schema_subsection(
+    builder: &mut DocumentBuilder,
+    section: DetailSection,
+    endpoint_id: usize,
+    schema_context: &str,
+    breadcrumb_prefix: &[String],
+    schema_root: Option<&SchemaNode>,
+    expanded_toggles: &HashSet<String>,
+    depth: usize,
+) {
+    let indent = "  ".repeat(depth);
+    let Some(schema_root) = schema_root else {
+        builder.push_row(
+            section,
+            &format!("{indent}[ ] schema: none"),
+            None,
+            None,
+            Some(breadcrumb_prefix.join(" > ")),
+            &format!("{indent}    "),
+        );
+        return;
+    };
+
+    let schema_toggle = toggle_id(endpoint_id, &format!("{schema_context}:schema"));
+    let schema_expanded = expanded_toggles.contains(&schema_toggle);
     builder.push_row(
-        DetailSection::Security,
-        "No security details indexed.",
-        None,
-        None,
-        None,
-        "  ",
+        section,
+        &format!("{indent}{} schema", fold_marker(schema_expanded)),
+        Some(format!("{schema_context}:schema")),
+        Some(schema_toggle),
+        Some(breadcrumb_prefix.join(" > ")),
+        &format!("{indent}    "),
     );
+
+    if schema_expanded {
+        let mut breadcrumb = breadcrumb_prefix.to_owned();
+        breadcrumb.push("schema".to_owned());
+        render_schema_node(
+            builder,
+            section,
+            endpoint_id,
+            schema_context,
+            schema_root,
+            expanded_toggles,
+            depth + 1,
+            &mut breadcrumb,
+        );
+    }
+}
+
+fn render_examples_subsection(
+    builder: &mut DocumentBuilder,
+    section: DetailSection,
+    endpoint_id: usize,
+    schema_context: &str,
+    breadcrumb_prefix: &[String],
+    examples: &[MediaExampleView],
+    expanded_toggles: &HashSet<String>,
+    depth: usize,
+) {
+    if examples.is_empty() {
+        return;
+    }
+
+    let indent = "  ".repeat(depth);
+    let examples_toggle = toggle_id(endpoint_id, &format!("{schema_context}:examples"));
+    let examples_expanded = expanded_toggles.contains(&examples_toggle);
+    let count = examples.len();
+    builder.push_row(
+        section,
+        &format!(
+            "{indent}{} example{} ({count})",
+            fold_marker(examples_expanded),
+            if count == 1 { "" } else { "s" }
+        ),
+        Some(format!("{schema_context}:examples")),
+        Some(examples_toggle),
+        Some(breadcrumb_prefix.join(" > ")),
+        &format!("{indent}    "),
+    );
+
+    if !examples_expanded {
+        return;
+    }
+
+    for example in examples {
+        render_media_example(builder, section, example, depth + 1, breadcrumb_prefix);
+    }
+}
+
+fn render_media_example(
+    builder: &mut DocumentBuilder,
+    section: DetailSection,
+    example: &MediaExampleView,
+    depth: usize,
+    breadcrumb_prefix: &[String],
+) {
+    let indent = "  ".repeat(depth);
+    let mut breadcrumb = breadcrumb_prefix.join(" > ");
+    breadcrumb.push_str(" > example ");
+    breadcrumb.push_str(&example.name);
+
+    builder.push_row(
+        section,
+        &format!("{indent}- {}", example.name),
+        None,
+        None,
+        Some(breadcrumb.clone()),
+        &format!("{indent}  "),
+    );
+
+    if let Some(summary) = example.summary.as_deref() {
+        builder.push_row(
+            section,
+            &format!("{indent}  summary: {summary}"),
+            None,
+            None,
+            Some(breadcrumb.clone()),
+            &format!("{indent}    "),
+        );
+    }
+
+    if let Some(description) = example.description.as_deref() {
+        builder.push_row(
+            section,
+            &format!("{indent}  description: {description}"),
+            None,
+            None,
+            Some(breadcrumb.clone()),
+            &format!("{indent}    "),
+        );
+    }
+
+    if let Some(value) = example.value.as_deref() {
+        builder.push_row(
+            section,
+            &format!("{indent}  value:"),
+            None,
+            None,
+            Some(breadcrumb.clone()),
+            &format!("{indent}    "),
+        );
+
+        for line in value.lines() {
+            builder.push_row(
+                section,
+                &format!("{indent}    {line}"),
+                None,
+                None,
+                Some(breadcrumb.clone()),
+                &format!("{indent}    "),
+            );
+        }
+    }
 }
 
 fn render_schema_node(
@@ -576,11 +765,6 @@ fn render_schema_node(
 
     let indent = "  ".repeat(depth);
     let required_suffix = if node.required { " *required" } else { "" };
-    let ref_suffix = node
-        .ref_name
-        .as_deref()
-        .map(|name| format!(" [ref:{name}]"))
-        .unwrap_or_default();
     let fold = if node.children.is_empty() {
         "[ ]"
     } else {
@@ -590,8 +774,8 @@ fn render_schema_node(
     builder.push_row(
         section,
         &format!(
-            "{indent}{fold} {} : {}{}{}",
-            node.label, node.type_label, required_suffix, ref_suffix
+            "{indent}{fold} {} : {}{}",
+            node.label, node.type_label, required_suffix
         ),
         Some(format!("schema:{}", node.id)),
         toggle_target,
@@ -608,39 +792,6 @@ fn render_schema_node(
             Some(breadcrumb_text.clone()),
             &format!("{indent}      "),
         );
-    }
-
-    if let Some(example) = node.example.as_deref() {
-        if let Some(lines) = try_pretty_json_lines(example) {
-            builder.push_row(
-                section,
-                &format!("{indent}    example:"),
-                None,
-                None,
-                Some(breadcrumb_text.clone()),
-                &format!("{indent}      "),
-            );
-
-            for line in lines {
-                builder.push_row(
-                    section,
-                    &format!("{indent}      {line}"),
-                    None,
-                    None,
-                    Some(breadcrumb_text.clone()),
-                    &format!("{indent}      "),
-                );
-            }
-        } else {
-            builder.push_row(
-                section,
-                &format!("{indent}    example: {example}"),
-                None,
-                None,
-                Some(breadcrumb_text.clone()),
-                &format!("{indent}      "),
-            );
-        }
     }
 
     if let Some(description) = node.description.as_deref()
@@ -747,32 +898,6 @@ fn toggle_id(endpoint_id: usize, key: &str) -> String {
     format!("endpoint:{endpoint_id}:{key}")
 }
 
-fn trim_to_width(value: &str, max_chars: usize) -> String {
-    if value.chars().count() <= max_chars {
-        return value.to_owned();
-    }
-
-    let mut output = String::new();
-    for (index, ch) in value.chars().enumerate() {
-        if index >= max_chars.saturating_sub(3) {
-            output.push_str("...");
-            break;
-        }
-        output.push(ch);
-    }
-    output
-}
-
-fn try_pretty_json_lines(raw: &str) -> Option<Vec<String>> {
-    let parsed = serde_json::from_str::<Value>(raw).ok()?;
-    if !matches!(parsed, Value::Object(_) | Value::Array(_)) {
-        return None;
-    }
-
-    let pretty = serde_json::to_string_pretty(&parsed).ok()?;
-    Some(pretty.lines().map(str::to_owned).collect())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -859,6 +984,7 @@ paths:
         let expanded = HashSet::from_iter([
             "endpoint:0:request_body".to_owned(),
             "endpoint:0:request_body:application/json".to_owned(),
+            "endpoint:0:request_body:application/json:schema".to_owned(),
             "endpoint:0:request_body:application/json:schema:schema".to_owned(),
             "endpoint:0:request_body:application/json:schema:schema/properties/payload".to_owned(),
         ]);
@@ -883,7 +1009,7 @@ paths:
     }
 
     #[test]
-    fn exposes_row_navigation_helpers() {
+    fn exposes_toggle_navigation_helpers() {
         let spec = parse_spec(
             r#"
 openapi: 3.1.0
@@ -900,30 +1026,20 @@ paths:
         );
         let endpoints = build_endpoint_index(&spec);
         let endpoint = &endpoints[0];
-        let doc = build_details_document(endpoint, 80, &HashSet::new());
+        let doc = build_details_document(
+            endpoint,
+            80,
+            &HashSet::from_iter(["endpoint:0:response:200".to_owned()]),
+        );
 
         let first = doc
-            .rows
-            .first()
-            .expect("detail document should include rows")
+            .nearest_toggle_row(0)
+            .expect("detail document should include toggle rows")
             .line_start;
         let second = doc
-            .rows
-            .get(1)
-            .expect("detail document should include multiple rows")
-            .line_start;
+            .next_toggle_line_start(first, 1)
+            .expect("second toggle row should exist");
 
-        assert_eq!(doc.next_row_line_start(first, 1), Some(second));
-        assert_eq!(doc.previous_row_line_start(second, 1), Some(first));
-    }
-
-    #[test]
-    fn pretty_prints_object_json_examples() {
-        let lines = try_pretty_json_lines(r#"{"id":1,"name":"demo"}"#)
-            .expect("object JSON should be recognized");
-
-        assert!(lines.first().is_some_and(|line| line == "{"));
-        assert!(lines.last().is_some_and(|line| line == "}"));
-        assert!(lines.iter().any(|line| line.contains("\"id\": 1")));
+        assert_eq!(doc.previous_toggle_line_start(second, 1), Some(first));
     }
 }

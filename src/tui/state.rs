@@ -199,7 +199,7 @@ impl AppState {
         let current_line = self.detail_cursor_line;
         if let Some(line_start) = self
             .detail_document_for_selected(detail_width)
-            .and_then(|document| document.previous_row_line_start(current_line, steps))
+            .and_then(|document| document.previous_toggle_line_start(current_line, steps))
         {
             self.detail_cursor_line = line_start;
         }
@@ -213,7 +213,7 @@ impl AppState {
         let current_line = self.detail_cursor_line;
         if let Some(line_start) = self
             .detail_document_for_selected(detail_width)
-            .and_then(|document| document.next_row_line_start(current_line, steps))
+            .and_then(|document| document.next_toggle_line_start(current_line, steps))
         {
             self.detail_cursor_line = line_start;
         }
@@ -923,13 +923,22 @@ paths:
         state.detail_cursor_line = media_line;
         state.toggle_detail_item();
         let media_expanded = state.detail_lines_for_selected(100).to_vec();
-        let schema_line = media_expanded
+        let schema_toggle_line = media_expanded
+            .iter()
+            .position(|line| line.contains("[+] schema"))
+            .expect("schema section toggle should be visible after expanding media type");
+
+        state.detail_scroll = schema_toggle_line;
+        state.detail_cursor_line = schema_toggle_line;
+        state.toggle_detail_item();
+        let schema_section_expanded = state.detail_lines_for_selected(100).to_vec();
+        let schema_root_line = schema_section_expanded
             .iter()
             .position(|line| line.contains("schema : object"))
-            .expect("schema root row should be visible after expanding media type");
+            .expect("schema root row should be visible after expanding schema section");
 
-        state.detail_scroll = schema_line;
-        state.detail_cursor_line = schema_line;
+        state.detail_scroll = schema_root_line;
+        state.detail_cursor_line = schema_root_line;
         state.toggle_detail_item();
         let schema_expanded = state.detail_lines_for_selected(100).to_vec();
         let id_line = schema_expanded

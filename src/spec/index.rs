@@ -36,6 +36,15 @@ pub struct MediaTypeView {
     pub content_type: String,
     pub schema: Option<String>,
     pub schema_tree: Option<SchemaNode>,
+    pub examples: Vec<MediaExampleView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MediaExampleView {
+    pub name: String,
+    pub summary: Option<String>,
+    pub description: Option<String>,
+    pub value: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -406,6 +415,20 @@ fn build_media_type_views(
 ) -> Vec<MediaTypeView> {
     let mut rendered = Vec::new();
     for (content_type, media_type) in media_types {
+        let examples = media_type
+            .examples(spec)
+            .into_iter()
+            .map(|(name, example)| MediaExampleView {
+                name,
+                summary: normalize_optional_text(example.summary),
+                description: normalize_optional_text(example.description),
+                value: example
+                    .value
+                    .as_ref()
+                    .and_then(|value| serde_json::to_string_pretty(value).ok()),
+            })
+            .collect::<Vec<_>>();
+
         rendered.push(MediaTypeView {
             content_type: content_type.clone(),
             schema: summarize_media_type_schema(media_type, spec),
@@ -413,6 +436,7 @@ fn build_media_type_views(
                 .schema
                 .as_ref()
                 .map(|schema| build_schema_tree(schema, spec, "schema")),
+            examples,
         });
     }
     rendered
@@ -446,6 +470,17 @@ fn extract_ref_path<T>(value: &ObjectOrReference<T>) -> Option<String> {
     } else {
         None
     }
+}
+
+fn normalize_optional_text(value: Option<String>) -> Option<String> {
+    value.and_then(|text| {
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_owned())
+        }
+    })
 }
 
 #[cfg(test)]

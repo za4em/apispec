@@ -4,18 +4,11 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 
-use crate::tui::details::DetailSection;
 use crate::tui::event::FrameMetrics;
 use crate::tui::state::{AppState, FocusPanel, InputMode};
 use crate::tui::tree::{TreeRow, TreeRowKind};
 
-const SECTION_HEADERS: [&str; 5] = [
-    "Description",
-    "Parameters",
-    "Request Body",
-    "Responses",
-    "Security",
-];
+const SECTION_HEADERS: [&str; 4] = ["Description", "Parameters", "Request Body", "Responses"];
 const HTTP_METHODS: [&str; 8] = [
     "GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD", "TRACE",
 ];
@@ -183,7 +176,8 @@ fn draw_endpoint_details(frame: &mut Frame<'_>, state: &mut AppState, area: Rect
         };
     }
 
-    let has_breadcrumb = inner.height >= 2;
+    let breadcrumb_value = state.active_breadcrumb().map(str::to_owned);
+    let has_breadcrumb = inner.height >= 2 && breadcrumb_value.is_some();
     let regions = if has_breadcrumb {
         Layout::default()
             .direction(Direction::Vertical)
@@ -212,13 +206,7 @@ fn draw_endpoint_details(frame: &mut Frame<'_>, state: &mut AppState, area: Rect
         None
     };
 
-    if has_breadcrumb {
-        let breadcrumb_value = state
-            .active_breadcrumb()
-            .map(str::to_owned)
-            .unwrap_or_else(|| {
-                format!("section: {}", section_label(state.active_detail_section()))
-            });
+    if has_breadcrumb && let Some(breadcrumb_value) = breadcrumb_value {
         let breadcrumb_line = Line::from(vec![
             Span::styled(
                 "Path ",
@@ -376,7 +364,9 @@ fn render_media_row(line: &str) -> Option<Line<'static>> {
     };
 
     let body = trimmed.strip_prefix(marker)?.trim_start();
-    let (left, right) = body.split_once("::")?;
+    let (left, right) = body
+        .split_once("::")
+        .map_or((body, None), |(left, right)| (left, Some(right)));
 
     let left_trimmed = left.trim();
     let is_response_media = left_trimmed.starts_with("media ");
@@ -408,19 +398,43 @@ fn render_media_row(line: &str) -> Option<Line<'static>> {
             .fg(Color::Cyan)
             .add_modifier(Modifier::BOLD),
     ));
-    spans.push(Span::styled(
-        " :: ".to_owned(),
-        Style::default().fg(Color::Gray),
-    ));
-    spans.push(Span::styled(
-        right.trim().to_owned(),
-        Style::default().fg(Color::LightYellow),
-    ));
+    if let Some(right) = right {
+        spans.push(Span::styled(
+            " :: ".to_owned(),
+            Style::default().fg(Color::Gray),
+        ));
+        spans.push(Span::styled(
+            right.trim().to_owned(),
+            Style::default().fg(Color::LightYellow),
+        ));
+    }
 
     Some(Line::from(spans))
 }
 
 fn render_parameter_row(line: &str) -> Option<Line<'static>> {
+    let trimmed = line.trim_start();
+    if let Some(name_and_requirement) = trimmed.strip_prefix("- ")
+        && let Some((name, requirement)) = name_and_requirement.rsplit_once(" (")
+    {
+        let requirement = requirement.trim_end_matches(')');
+        let requirement_style = if requirement.eq_ignore_ascii_case("required") {
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Yellow)
+        };
+
+        return Some(Line::from(vec![
+            Span::styled("- ".to_owned(), Style::default().fg(Color::Gray)),
+            Span::styled(name.to_owned(), Style::default().fg(Color::Cyan)),
+            Span::raw(" ("),
+            Span::styled(requirement.to_owned(), requirement_style),
+            Span::raw(")"),
+        ]));
+    }
+
     if !line.contains(" | ") || !line.contains("| required:") {
         return None;
     }
@@ -462,9 +476,11 @@ fn render_label_value_row(line: &str) -> Option<Line<'static>> {
     let trimmed_label = label.trim();
 
     let label_style = match trimmed_label {
-        "Operation ID" | "Tags" | "enum" | "example" => Style::default()
-            .fg(Color::Gray)
-            .add_modifier(Modifier::BOLD),
+        "enum" | "example" | "schema" | "summary" | "description" | "value" | "in" => {
+            Style::default()
+                .fg(Color::Gray)
+                .add_modifier(Modifier::BOLD)
+        }
         "unresolved ref" | "Unresolved parameter ref" => {
             Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
         }
@@ -602,16 +618,6 @@ fn status_style(status: &str) -> Style {
     Style::default().fg(color)
 }
 
-fn section_label(section: DetailSection) -> &'static str {
-    match section {
-        DetailSection::Overview => "overview",
-        DetailSection::Parameters => "parameters",
-        DetailSection::RequestBody => "request body",
-        DetailSection::Responses => "responses",
-        DetailSection::Security => "security",
-    }
-}
-
 fn focused_border_style() -> Style {
     Style::default()
         .fg(Color::Cyan)
@@ -625,7 +631,7 @@ fn unfocused_border_style() -> Style {
 fn help_text(mode: InputMode) -> &'static str {
     match mode {
         InputMode::Normal => {
-            "q quit | Tree: j/k move g/G first/last PgUp/PgDn jump Enter open Right toggle group | Details: j/k row nav h/l scroll Tab next section Enter toggle Esc back | / or Ctrl+s search | Ctrl+u clear"
+            "q quit | Tree: j/k move g/G first/last PgUp/PgDn jump Enter open Right toggle group | Details: j/k toggle nav h/l scroll Tab next section Enter toggle Esc back | / or Ctrl+s search | Ctrl+u clear"
         }
         InputMode::Search => {
             "Search mode: type to filter | Backspace delete | Ctrl+u clear | Enter or Esc to return"
