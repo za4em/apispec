@@ -44,6 +44,7 @@ pub struct AppState {
     selected_tree_row: usize,
     selected_endpoint_id: Option<usize>,
     detail_scroll: usize,
+    detail_cursor_line: usize,
     detail_cache: HashMap<(usize, u16, String), DetailsDocument>,
     details_state: DetailsState,
     search_query: String,
@@ -91,6 +92,7 @@ impl AppState {
             selected_tree_row,
             selected_endpoint_id,
             detail_scroll: 0,
+            detail_cursor_line: 0,
             detail_cache: HashMap::new(),
             details_state: DetailsState::default(),
             search_query: String::new(),
@@ -166,16 +168,17 @@ impl AppState {
             });
         if let Some((line_start, breadcrumb)) = next_position {
             self.detail_scroll = line_start;
+            self.detail_cursor_line = line_start;
             self.details_state.active_breadcrumb = breadcrumb;
         }
     }
 
     pub fn toggle_detail_item(&mut self) {
         let width = self.details_state.last_detail_width.max(MIN_DETAIL_WIDTH);
-        let current_scroll = self.detail_scroll;
+        let current_line = self.detail_cursor_line;
         let Some(toggle_target) = self
             .detail_document_for_selected(width)
-            .and_then(|document| document.nearest_toggle_row(current_scroll))
+            .and_then(|document| document.nearest_toggle_row(current_line))
             .and_then(|row| row.toggle_target.as_deref())
             .map(str::to_owned)
         else {
@@ -189,6 +192,34 @@ impl AppState {
         }
 
         self.drop_detail_cache_for_selected_endpoint();
+    }
+
+    pub fn move_detail_row_up(&mut self, steps: usize, detail_height: u16, detail_width: u16) {
+        self.details_state.last_detail_width = detail_width.max(MIN_DETAIL_WIDTH);
+        let current_line = self.detail_cursor_line;
+        if let Some(line_start) = self
+            .detail_document_for_selected(detail_width)
+            .and_then(|document| document.previous_row_line_start(current_line, steps))
+        {
+            self.detail_cursor_line = line_start;
+        }
+
+        self.ensure_detail_cursor_visible(detail_height, detail_width);
+        self.update_active_breadcrumb_for_current_cursor();
+    }
+
+    pub fn move_detail_row_down(&mut self, steps: usize, detail_height: u16, detail_width: u16) {
+        self.details_state.last_detail_width = detail_width.max(MIN_DETAIL_WIDTH);
+        let current_line = self.detail_cursor_line;
+        if let Some(line_start) = self
+            .detail_document_for_selected(detail_width)
+            .and_then(|document| document.next_row_line_start(current_line, steps))
+        {
+            self.detail_cursor_line = line_start;
+        }
+
+        self.ensure_detail_cursor_visible(detail_height, detail_width);
+        self.update_active_breadcrumb_for_current_cursor();
     }
 
     pub fn push_search_char(&mut self, ch: char) {
@@ -319,7 +350,8 @@ impl AppState {
 
     pub fn scroll_detail_up(&mut self, steps: usize) {
         self.detail_scroll = self.detail_scroll.saturating_sub(steps);
-        self.update_active_breadcrumb_for_current_scroll();
+        self.detail_cursor_line = self.detail_scroll;
+        self.update_active_breadcrumb_for_current_cursor();
     }
 
     pub fn scroll_detail_down(&mut self, steps: usize, detail_height: u16, detail_width: u16) {
@@ -330,7 +362,8 @@ impl AppState {
         let detail_len = self.detail_lines_for_selected(detail_width).len();
         let max_scroll = detail_len.saturating_sub(detail_height as usize);
         self.detail_scroll = (self.detail_scroll + steps).min(max_scroll);
-        self.update_active_breadcrumb_for_current_scroll();
+        self.detail_cursor_line = self.detail_scroll;
+        self.update_active_breadcrumb_for_current_cursor();
     }
 
     pub fn detail_scroll(&self) -> usize {
@@ -344,7 +377,9 @@ impl AppState {
         if self.detail_scroll > max_scroll {
             self.detail_scroll = max_scroll;
         }
-        self.update_active_breadcrumb_for_current_scroll();
+        self.clamp_detail_cursor_to_len(detail_len);
+        self.ensure_detail_cursor_visible(detail_height, detail_width);
+        self.update_active_breadcrumb_for_current_cursor();
     }
 
     pub fn detail_lines_for_selected(&mut self, detail_width: u16) -> &[String] {
@@ -353,10 +388,10 @@ impl AppState {
             return &self.empty_detail_lines;
         }
 
-        let current_scroll = self.detail_scroll;
+        let current_line = self.detail_cursor_line;
         self.details_state.active_breadcrumb = self
             .detail_document_for_selected(detail_width)
-            .and_then(|document| document.breadcrumb_for_line(current_scroll))
+            .and_then(|document| document.breadcrumb_for_line(current_line))
             .map(str::to_owned);
 
         let document = self
@@ -371,9 +406,9 @@ impl AppState {
 
     pub fn active_detail_row_span(&mut self, detail_width: u16) -> Option<(usize, usize)> {
         self.details_state.last_detail_width = detail_width.max(MIN_DETAIL_WIDTH);
-        let current_scroll = self.detail_scroll;
+        let current_line = self.detail_cursor_line;
         self.detail_document_for_selected(detail_width)
-            .and_then(|document| document.row_for_line(current_scroll))
+            .and_then(|document| document.row_for_line(current_line))
             .map(|row| (row.line_start, row.line_len.max(1)))
     }
 
@@ -555,16 +590,54 @@ impl AppState {
 
     fn reset_details_navigation(&mut self) {
         self.detail_scroll = 0;
+        self.detail_cursor_line = 0;
         self.details_state.active_breadcrumb = None;
     }
 
-    fn update_active_breadcrumb_for_current_scroll(&mut self) {
+    fn update_active_breadcrumb_for_current_cursor(&mut self) {
         let width = self.details_state.last_detail_width.max(MIN_DETAIL_WIDTH);
-        let current_scroll = self.detail_scroll;
+        let current_line = self.detail_cursor_line;
         self.details_state.active_breadcrumb = self
             .detail_document_for_selected(width)
-            .and_then(|document| document.breadcrumb_for_line(current_scroll))
+            .and_then(|document| document.breadcrumb_for_line(current_line))
             .map(str::to_owned);
+    }
+
+    fn ensure_detail_cursor_visible(&mut self, detail_height: u16, detail_width: u16) {
+        if detail_height == 0 {
+            return;
+        }
+
+        let detail_len = self.detail_lines_for_selected(detail_width).len();
+        self.clamp_detail_cursor_to_len(detail_len);
+
+        let viewport_height = detail_height as usize;
+        let max_scroll = detail_len.saturating_sub(viewport_height);
+        if self.detail_scroll > max_scroll {
+            self.detail_scroll = max_scroll;
+        }
+
+        if self.detail_cursor_line < self.detail_scroll {
+            self.detail_scroll = self.detail_cursor_line;
+            return;
+        }
+
+        let viewport_end = self
+            .detail_scroll
+            .saturating_add(viewport_height.saturating_sub(1));
+        if self.detail_cursor_line > viewport_end {
+            self.detail_scroll = self
+                .detail_cursor_line
+                .saturating_sub(viewport_height.saturating_sub(1))
+                .min(max_scroll);
+        }
+    }
+
+    fn clamp_detail_cursor_to_len(&mut self, detail_len: usize) {
+        let max_line = detail_len.saturating_sub(1);
+        if self.detail_cursor_line > max_line {
+            self.detail_cursor_line = max_line;
+        }
     }
 }
 
@@ -847,6 +920,7 @@ paths:
             .expect("request media row should be visible after expanding request body");
 
         state.detail_scroll = media_line;
+        state.detail_cursor_line = media_line;
         state.toggle_detail_item();
         let media_expanded = state.detail_lines_for_selected(100).to_vec();
         let schema_line = media_expanded
@@ -855,6 +929,7 @@ paths:
             .expect("schema root row should be visible after expanding media type");
 
         state.detail_scroll = schema_line;
+        state.detail_cursor_line = schema_line;
         state.toggle_detail_item();
         let schema_expanded = state.detail_lines_for_selected(100).to_vec();
         let id_line = schema_expanded
@@ -863,11 +938,62 @@ paths:
             .expect("schema property row should be visible when schema root is expanded");
 
         state.detail_scroll = id_line;
+        state.detail_cursor_line = id_line;
         state.clamp_detail_scroll(1, 100);
         assert!(
             state
                 .active_breadcrumb()
                 .is_some_and(|breadcrumb| breadcrumb.contains("id"))
+        );
+    }
+
+    #[test]
+    fn detail_row_navigation_works_without_scrollable_viewport() {
+        let spec = parse_spec(
+            r#"
+openapi: 3.1.0
+info:
+  title: demo
+  version: 1.0.0
+paths:
+  /items:
+    post:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+"#,
+        );
+        let endpoints = build_endpoint_index(&spec);
+        let mut state = AppState::new(demo_context(), endpoints);
+        let detail_height = 100;
+        let detail_width = 120;
+
+        state.toggle_detail_item();
+        let before = state.detail_lines_for_selected(detail_width).to_vec();
+        let response_row = before
+            .iter()
+            .position(|line| line.contains("[+] 200:"))
+            .expect("response row should exist");
+
+        while state.detail_cursor_line < response_row {
+            state.move_detail_row_down(1, detail_height, detail_width);
+        }
+
+        state.toggle_detail_item();
+        let after = state.detail_lines_for_selected(detail_width).to_vec();
+        assert!(
+            after.iter().any(|line| line.contains("[-] 200:")),
+            "response toggle should switch once cursor reaches response row"
         );
     }
 

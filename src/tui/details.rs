@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::spec::index::{EndpointSummary, ParameterView};
 use crate::spec::schema_tree::SchemaNode;
+use serde_json::Value;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DetailSection {
@@ -75,6 +76,29 @@ impl DetailsDocument {
             .and_then(|row_index| self.rows.get(*row_index))
     }
 
+    pub fn previous_row_line_start(&self, line_index: usize, steps: usize) -> Option<usize> {
+        let mut row_index = self.row_index_for_line_or_next(line_index)?;
+        for _ in 0..steps {
+            if row_index == 0 {
+                break;
+            }
+            row_index -= 1;
+        }
+        self.rows.get(row_index).map(|row| row.line_start)
+    }
+
+    pub fn next_row_line_start(&self, line_index: usize, steps: usize) -> Option<usize> {
+        let mut row_index = self.row_index_for_line_or_next(line_index)?;
+        for _ in 0..steps {
+            let next = row_index.saturating_add(1);
+            if next >= self.rows.len() {
+                break;
+            }
+            row_index = next;
+        }
+        self.rows.get(row_index).map(|row| row.line_start)
+    }
+
     pub fn breadcrumb_for_line(&self, line_index: usize) -> Option<&str> {
         self.row_for_line(line_index)
             .and_then(|row| row.breadcrumb.as_deref())
@@ -89,6 +113,25 @@ impl DetailsDocument {
 
     pub fn row_index_by_id(&self, row_id: &str) -> Option<usize> {
         self.row_index_by_id.get(row_id).copied()
+    }
+
+    fn row_index_for_line_or_next(&self, line_index: usize) -> Option<usize> {
+        if self.rows.is_empty() {
+            return None;
+        }
+
+        if let Some(found) = self.rows.iter().position(|row| {
+            let row_end = row.line_start.saturating_add(row.line_len.max(1));
+            line_index >= row.line_start && line_index < row_end
+        }) {
+            return Some(found);
+        }
+
+        if let Some(found) = self.rows.iter().position(|row| row.line_start > line_index) {
+            return Some(found);
+        }
+
+        Some(self.rows.len().saturating_sub(1))
     }
 }
 
@@ -568,14 +611,36 @@ fn render_schema_node(
     }
 
     if let Some(example) = node.example.as_deref() {
-        builder.push_row(
-            section,
-            &format!("{indent}    example: {example}"),
-            None,
-            None,
-            Some(breadcrumb_text.clone()),
-            &format!("{indent}      "),
-        );
+        if let Some(lines) = try_pretty_json_lines(example) {
+            builder.push_row(
+                section,
+                &format!("{indent}    example:"),
+                None,
+                None,
+                Some(breadcrumb_text.clone()),
+                &format!("{indent}      "),
+            );
+
+            for line in lines {
+                builder.push_row(
+                    section,
+                    &format!("{indent}      {line}"),
+                    None,
+                    None,
+                    Some(breadcrumb_text.clone()),
+                    &format!("{indent}      "),
+                );
+            }
+        } else {
+            builder.push_row(
+                section,
+                &format!("{indent}    example: {example}"),
+                None,
+                None,
+                Some(breadcrumb_text.clone()),
+                &format!("{indent}      "),
+            );
+        }
     }
 
     if let Some(description) = node.description.as_deref()
@@ -698,6 +763,16 @@ fn trim_to_width(value: &str, max_chars: usize) -> String {
     output
 }
 
+fn try_pretty_json_lines(raw: &str) -> Option<Vec<String>> {
+    let parsed = serde_json::from_str::<Value>(raw).ok()?;
+    if !matches!(parsed, Value::Object(_) | Value::Array(_)) {
+        return None;
+    }
+
+    let pretty = serde_json::to_string_pretty(&parsed).ok()?;
+    Some(pretty.lines().map(str::to_owned).collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -805,5 +880,50 @@ paths:
         assert!(breadcrumb.contains("request body"));
         assert!(breadcrumb.contains("payload"));
         assert!(breadcrumb.contains("id"));
+    }
+
+    #[test]
+    fn exposes_row_navigation_helpers() {
+        let spec = parse_spec(
+            r#"
+openapi: 3.1.0
+info:
+  title: demo
+  version: 1.0.0
+paths:
+  /items:
+    get:
+      responses:
+        "200":
+          description: ok
+"#,
+        );
+        let endpoints = build_endpoint_index(&spec);
+        let endpoint = &endpoints[0];
+        let doc = build_details_document(endpoint, 80, &HashSet::new());
+
+        let first = doc
+            .rows
+            .first()
+            .expect("detail document should include rows")
+            .line_start;
+        let second = doc
+            .rows
+            .get(1)
+            .expect("detail document should include multiple rows")
+            .line_start;
+
+        assert_eq!(doc.next_row_line_start(first, 1), Some(second));
+        assert_eq!(doc.previous_row_line_start(second, 1), Some(first));
+    }
+
+    #[test]
+    fn pretty_prints_object_json_examples() {
+        let lines = try_pretty_json_lines(r#"{"id":1,"name":"demo"}"#)
+            .expect("object JSON should be recognized");
+
+        assert!(lines.first().is_some_and(|line| line == "{"));
+        assert!(lines.last().is_some_and(|line| line == "}"));
+        assert!(lines.iter().any(|line| line.contains("\"id\": 1")));
     }
 }

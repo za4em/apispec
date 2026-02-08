@@ -15,6 +15,8 @@ pub enum Action {
     TreeActivate,
     DetailScrollUp,
     DetailScrollDown,
+    DetailMoveUp,
+    DetailMoveDown,
     DetailPageUp,
     DetailPageDown,
     DetailNextSection,
@@ -83,10 +85,10 @@ fn map_tree_focus_key(key: KeyEvent) -> Option<Action> {
 
 fn map_details_focus_key(key: KeyEvent) -> Option<Action> {
     match key.code {
-        KeyCode::Char('j') if key.modifiers.is_empty() => Some(Action::DetailScrollDown),
-        KeyCode::Char('k') if key.modifiers.is_empty() => Some(Action::DetailScrollUp),
-        KeyCode::Down => Some(Action::DetailScrollDown),
-        KeyCode::Up => Some(Action::DetailScrollUp),
+        KeyCode::Char('j') if key.modifiers.is_empty() => Some(Action::DetailMoveDown),
+        KeyCode::Char('k') if key.modifiers.is_empty() => Some(Action::DetailMoveUp),
+        KeyCode::Down => Some(Action::DetailMoveDown),
+        KeyCode::Up => Some(Action::DetailMoveUp),
         KeyCode::PageUp => Some(Action::DetailPageUp),
         KeyCode::PageDown => Some(Action::DetailPageDown),
         KeyCode::Char('h') if key.modifiers.is_empty() => Some(Action::DetailScrollUp),
@@ -148,7 +150,7 @@ mod tests {
     fn maps_details_focus_keys_to_detail_actions() {
         assert_eq!(
             map_key(InputMode::Normal, FocusPanel::Details, key(KeyCode::Down)),
-            Some(Action::DetailScrollDown)
+            Some(Action::DetailMoveDown)
         );
         assert_eq!(
             map_key(InputMode::Normal, FocusPanel::Details, key(KeyCode::Tab)),

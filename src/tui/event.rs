@@ -47,6 +47,12 @@ fn handle_key_event(state: &mut AppState, key: KeyEvent, metrics: FrameMetrics) 
         Action::DetailScrollDown => {
             state.scroll_detail_down(1, metrics.detail_height, metrics.detail_width)
         }
+        Action::DetailMoveUp => {
+            state.move_detail_row_up(1, metrics.detail_height, metrics.detail_width)
+        }
+        Action::DetailMoveDown => {
+            state.move_detail_row_down(1, metrics.detail_height, metrics.detail_width)
+        }
         Action::DetailPageUp => state.scroll_detail_up(12),
         Action::DetailPageDown => {
             state.scroll_detail_down(12, metrics.detail_height, metrics.detail_width)

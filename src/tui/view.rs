@@ -274,6 +274,8 @@ fn styled_detail_line(line: &str, active: bool) -> Line<'static> {
         styled
     } else if let Some(styled) = render_label_value_row(line) {
         styled
+    } else if let Some(styled) = render_json_line(line) {
+        styled
     } else {
         Line::from(vec![Span::raw(line.to_owned())])
     };
@@ -475,6 +477,104 @@ fn render_label_value_row(line: &str) -> Option<Line<'static>> {
     ]))
 }
 
+fn render_json_line(line: &str) -> Option<Line<'static>> {
+    let indent_size = line.len().saturating_sub(line.trim_start().len());
+    let indent = &line[..indent_size];
+    let trimmed = line.trim_start();
+
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if is_json_bracket_line(trimmed) {
+        return Some(Line::from(vec![
+            Span::raw(indent.to_owned()),
+            Span::styled(
+                trimmed.to_owned(),
+                Style::default()
+                    .fg(Color::Gray)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]));
+    }
+
+    if let Some((key, value_part)) = parse_json_object_entry(trimmed) {
+        let mut spans = vec![
+            Span::raw(indent.to_owned()),
+            Span::styled(format!("\"{key}\""), Style::default().fg(Color::Cyan)),
+            Span::styled(": ".to_owned(), Style::default().fg(Color::Gray)),
+        ];
+        spans.extend(style_json_value(value_part));
+        return Some(Line::from(spans));
+    }
+
+    if looks_like_json_value(trimmed) {
+        let mut spans = vec![Span::raw(indent.to_owned())];
+        spans.extend(style_json_value(trimmed));
+        return Some(Line::from(spans));
+    }
+
+    None
+}
+
+fn parse_json_object_entry(line: &str) -> Option<(String, &str)> {
+    if !line.starts_with('"') {
+        return None;
+    }
+    let key_end = line.find("\":")?;
+    let key = line.get(1..key_end)?.to_owned();
+    let value = line.get((key_end + 2)..)?.trim_start();
+    Some((key, value))
+}
+
+fn is_json_bracket_line(line: &str) -> bool {
+    matches!(line, "{" | "}" | "[" | "]" | "{," | "}," | "]," | "[,")
+}
+
+fn looks_like_json_value(line: &str) -> bool {
+    let value = strip_trailing_comma(line);
+    value.starts_with('"')
+        || matches!(value, "true" | "false" | "null")
+        || value.parse::<f64>().is_ok()
+        || matches!(value, "{" | "[" | "}" | "]")
+}
+
+fn style_json_value(value_with_optional_comma: &str) -> Vec<Span<'static>> {
+    let has_comma = value_with_optional_comma.trim_end().ends_with(',');
+    let core = strip_trailing_comma(value_with_optional_comma);
+
+    let style = if core.starts_with('"') {
+        Style::default().fg(Color::Green)
+    } else if matches!(core, "true" | "false") {
+        Style::default()
+            .fg(Color::Magenta)
+            .add_modifier(Modifier::BOLD)
+    } else if core == "null" {
+        Style::default().fg(Color::DarkGray)
+    } else if core.parse::<f64>().is_ok() {
+        Style::default().fg(Color::Yellow)
+    } else if matches!(core, "{" | "[" | "}" | "]") {
+        Style::default()
+            .fg(Color::Gray)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::White)
+    };
+
+    let mut spans = vec![Span::styled(core.to_owned(), style)];
+    if has_comma {
+        spans.push(Span::styled(
+            ",".to_owned(),
+            Style::default().fg(Color::Gray),
+        ));
+    }
+    spans
+}
+
+fn strip_trailing_comma(value: &str) -> &str {
+    value.trim().trim_end_matches(',').trim_end()
+}
+
 fn method_style(method: &str) -> Style {
     let color = match method {
         "GET" => Color::Green,
@@ -525,7 +625,7 @@ fn unfocused_border_style() -> Style {
 fn help_text(mode: InputMode) -> &'static str {
     match mode {
         InputMode::Normal => {
-            "q quit | Tree: j/k move g/G first/last PgUp/PgDn jump Enter open Right toggle group | Details: j/k scroll Tab next section Enter toggle Esc back | / or Ctrl+s search | Ctrl+u clear"
+            "q quit | Tree: j/k move g/G first/last PgUp/PgDn jump Enter open Right toggle group | Details: j/k row nav h/l scroll Tab next section Enter toggle Esc back | / or Ctrl+s search | Ctrl+u clear"
         }
         InputMode::Search => {
             "Search mode: type to filter | Backspace delete | Ctrl+u clear | Enter or Esc to return"

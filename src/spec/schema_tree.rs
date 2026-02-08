@@ -323,13 +323,23 @@ fn extract_example(raw: Option<&serde_json::Map<String, Value>>) -> Option<Strin
     };
 
     if let Some(example) = raw.get("example") {
-        return Some(compact_value(example));
+        return Some(format_example_value(example));
     }
 
     raw.get("examples")
         .and_then(Value::as_array)
         .and_then(|values| values.first())
-        .map(compact_value)
+        .map(format_example_value)
+}
+
+fn format_example_value(value: &Value) -> String {
+    match value {
+        Value::String(inner) => inner.clone(),
+        Value::Object(_) | Value::Array(_) => {
+            serde_json::to_string_pretty(value).unwrap_or_else(|_| compact_value(value))
+        }
+        _ => serde_json::to_string(value).unwrap_or_else(|_| compact_value(value)),
+    }
 }
 
 fn compact_value(value: &Value) -> String {
@@ -567,5 +577,48 @@ components:
             .expect("leaf child missing");
 
         assert_eq!(leaf.type_label, "string");
+    }
+
+    #[test]
+    fn keeps_structured_examples_as_pretty_json() {
+        let spec = parse_spec(
+            r##"
+openapi: 3.1.0
+info:
+  title: demo
+  version: 1.0.0
+paths: {}
+components:
+  schemas:
+    Sample:
+      type: object
+      properties:
+        payload:
+          type: object
+          example:
+            id: 1
+            tags: [a, b]
+"##,
+        );
+
+        let schema_ref = ObjectOrReference::Ref {
+            ref_path: "#/components/schemas/Sample".to_owned(),
+            summary: None,
+            description: None,
+        };
+
+        let root = build_schema_tree(&schema_ref, &spec, "schema");
+        let payload = root
+            .children
+            .iter()
+            .find(|child| child.label == "payload")
+            .expect("payload child missing");
+        let example = payload
+            .example
+            .as_deref()
+            .expect("example should be extracted");
+
+        assert!(example.contains('\n'));
+        assert!(example.contains("\"id\": 1"));
     }
 }
