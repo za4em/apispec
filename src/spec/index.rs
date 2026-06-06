@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashSet};
 
 use oas3::spec::{
@@ -5,10 +6,12 @@ use oas3::spec::{
 };
 
 use crate::spec::render::{summarize_media_type_schema, summarize_parameter_schema};
+use crate::spec::schema_tree::{SchemaNode, build_schema_tree};
 
 const METHOD_ORDER: [&str; 8] = [
     "GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD", "TRACE",
 ];
+const UNTAGGED_GROUP: &str = "Untagged";
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct GroupedParameters {
@@ -32,6 +35,16 @@ pub struct ParameterView {
 pub struct MediaTypeView {
     pub content_type: String,
     pub schema: Option<String>,
+    pub schema_tree: Option<SchemaNode>,
+    pub examples: Vec<MediaExampleView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MediaExampleView {
+    pub name: String,
+    pub summary: Option<String>,
+    pub description: Option<String>,
+    pub value: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,6 +68,9 @@ pub struct EndpointSummary {
     pub method: String,
     pub path: String,
     pub title: String,
+    pub tags: Vec<String>,
+    pub group_key: String,
+    pub group_sort_key: String,
     pub description: Option<String>,
     pub operation_id: Option<String>,
     pub grouped_parameters: GroupedParameters,
@@ -76,12 +92,18 @@ pub fn build_endpoint_index(spec: &Spec) -> Vec<EndpointSummary> {
                 .summary
                 .clone()
                 .unwrap_or_else(|| format!("{method} {path}"));
+            let tags = normalize_operation_tags(&operation.tags);
+            let group_key = derive_group_key(&tags, path);
+            let group_sort_key = normalize_group_sort_key(&group_key);
 
             endpoints.push(EndpointSummary {
                 id: 0,
                 method: method.to_owned(),
                 path: path.clone(),
                 title: title.clone(),
+                tags: tags.clone(),
+                group_key: group_key.clone(),
+                group_sort_key,
                 description: operation.description.clone(),
                 operation_id: operation.operation_id.clone(),
                 grouped_parameters: merge_parameters(&resolved_path_item, operation, spec),
@@ -92,17 +114,15 @@ pub fn build_endpoint_index(spec: &Spec) -> Vec<EndpointSummary> {
                     path,
                     &title,
                     operation.operation_id.as_deref(),
+                    operation.description.as_deref(),
+                    &group_key,
+                    &tags,
                 ),
             });
         }
     }
 
-    endpoints.sort_by(|left, right| {
-        left.path
-            .cmp(&right.path)
-            .then(method_rank(&left.method).cmp(&method_rank(&right.method)))
-            .then(left.method.cmp(&right.method))
-    });
+    endpoints.sort_by(compare_endpoint_order);
 
     for (id, endpoint) in endpoints.iter_mut().enumerate() {
         endpoint.id = id;
@@ -184,6 +204,66 @@ fn method_rank(method: &str) -> usize {
         .iter()
         .position(|candidate| *candidate == method)
         .unwrap_or(METHOD_ORDER.len())
+}
+
+fn normalize_operation_tags(tags: &[String]) -> Vec<String> {
+    tags.iter()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+fn derive_group_key(tags: &[String], path: &str) -> String {
+    if let Some(tag) = tags.first() {
+        return tag.clone();
+    }
+
+    if let Some(segment) = first_meaningful_path_segment(path) {
+        return segment;
+    }
+
+    UNTAGGED_GROUP.to_owned()
+}
+
+fn first_meaningful_path_segment(path: &str) -> Option<String> {
+    path.split('/')
+        .map(str::trim)
+        .find(|segment| {
+            !segment.is_empty()
+                && !(segment.starts_with('{') && segment.ends_with('}') && segment.len() >= 2)
+        })
+        .map(str::to_owned)
+}
+
+fn normalize_group_sort_key(group_key: &str) -> String {
+    group_key.trim().to_ascii_lowercase()
+}
+
+fn is_untagged_group(group_key: &str) -> bool {
+    group_key == UNTAGGED_GROUP
+}
+
+fn compare_group_order(left: &EndpointSummary, right: &EndpointSummary) -> Ordering {
+    match (
+        is_untagged_group(&left.group_key),
+        is_untagged_group(&right.group_key),
+    ) {
+        (true, false) => Ordering::Greater,
+        (false, true) => Ordering::Less,
+        _ => left
+            .group_sort_key
+            .cmp(&right.group_sort_key)
+            .then(left.group_key.cmp(&right.group_key)),
+    }
+}
+
+fn compare_endpoint_order(left: &EndpointSummary, right: &EndpointSummary) -> Ordering {
+    compare_group_order(left, right)
+        .then(left.path.cmp(&right.path))
+        .then(method_rank(&left.method).cmp(&method_rank(&right.method)))
+        .then(left.method.cmp(&right.method))
+        .then(left.title.cmp(&right.title))
 }
 
 fn merge_parameters(path_item: &PathItem, operation: &Operation, spec: &Spec) -> GroupedParameters {
@@ -335,21 +415,51 @@ fn build_media_type_views(
 ) -> Vec<MediaTypeView> {
     let mut rendered = Vec::new();
     for (content_type, media_type) in media_types {
+        let examples = media_type
+            .examples(spec)
+            .into_iter()
+            .map(|(name, example)| MediaExampleView {
+                name,
+                summary: normalize_optional_text(example.summary),
+                description: normalize_optional_text(example.description),
+                value: example
+                    .value
+                    .as_ref()
+                    .and_then(|value| serde_json::to_string_pretty(value).ok()),
+            })
+            .collect::<Vec<_>>();
+
         rendered.push(MediaTypeView {
             content_type: content_type.clone(),
             schema: summarize_media_type_schema(media_type, spec),
+            schema_tree: media_type
+                .schema
+                .as_ref()
+                .map(|schema| build_schema_tree(schema, spec, "schema")),
+            examples,
         });
     }
     rendered
 }
 
-fn build_search_text(method: &str, path: &str, title: &str, operation_id: Option<&str>) -> String {
+fn build_search_text(
+    method: &str,
+    path: &str,
+    title: &str,
+    operation_id: Option<&str>,
+    description: Option<&str>,
+    group_key: &str,
+    tags: &[String],
+) -> String {
     format!(
-        "{} {} {} {}",
+        "{} {} {} {} {} {} {}",
         method,
         path,
         title,
-        operation_id.unwrap_or_default()
+        operation_id.unwrap_or_default(),
+        description.unwrap_or_default(),
+        group_key,
+        tags.join(" ")
     )
     .to_ascii_lowercase()
 }
@@ -360,6 +470,17 @@ fn extract_ref_path<T>(value: &ObjectOrReference<T>) -> Option<String> {
     } else {
         None
     }
+}
+
+fn normalize_optional_text(value: Option<String>) -> Option<String> {
+    value.and_then(|text| {
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_owned())
+        }
+    })
 }
 
 #[cfg(test)]
@@ -447,9 +568,161 @@ paths:
         let endpoints = build_endpoint_index(&spec);
         let methods = endpoints
             .iter()
+            .filter(|endpoint| endpoint.path == "/items")
             .map(|endpoint| endpoint.method.clone())
             .collect::<Vec<_>>();
         assert_eq!(methods, vec!["GET", "POST", "DELETE"]);
+    }
+
+    #[test]
+    fn derives_groups_with_tag_then_path_segment_then_untagged_fallback() {
+        let spec = parse_spec(
+            r#"
+openapi: 3.1.0
+info:
+  title: demo
+  version: 1.0.0
+paths:
+  /pets:
+    get:
+      tags: ["Animals"]
+      responses:
+        "200":
+          description: ok
+  /users/{id}:
+    get:
+      responses:
+        "200":
+          description: ok
+  /{id}:
+    get:
+      responses:
+        "200":
+          description: ok
+"#,
+        );
+
+        let endpoints = build_endpoint_index(&spec);
+        assert_eq!(endpoints.len(), 3);
+
+        let pets = endpoints
+            .iter()
+            .find(|endpoint| endpoint.path == "/pets")
+            .expect("pets endpoint missing");
+        assert_eq!(pets.tags, vec!["Animals".to_owned()]);
+        assert_eq!(pets.group_key, "Animals");
+        assert_eq!(pets.group_sort_key, "animals");
+
+        let users = endpoints
+            .iter()
+            .find(|endpoint| endpoint.path == "/users/{id}")
+            .expect("users endpoint missing");
+        assert_eq!(users.tags, Vec::<String>::new());
+        assert_eq!(users.group_key, "users");
+        assert_eq!(users.group_sort_key, "users");
+
+        let parameter_only = endpoints
+            .iter()
+            .find(|endpoint| endpoint.path == "/{id}")
+            .expect("parameter-only endpoint missing");
+        assert_eq!(parameter_only.group_key, "Untagged");
+        assert_eq!(parameter_only.group_sort_key, "untagged");
+    }
+
+    #[test]
+    fn sorts_groups_alphabetically_and_keeps_untagged_last() {
+        let spec = parse_spec(
+            r#"
+openapi: 3.1.0
+info:
+  title: demo
+  version: 1.0.0
+paths:
+  /zeta:
+    get:
+      tags: ["zeta"]
+      responses:
+        "200":
+          description: ok
+  /alpha-post:
+    post:
+      tags: ["alpha"]
+      responses:
+        "200":
+          description: ok
+  /alpha-get:
+    get:
+      tags: ["alpha"]
+      responses:
+        "200":
+          description: ok
+  /{id}:
+    get:
+      responses:
+        "200":
+          description: ok
+"#,
+        );
+
+        let endpoints = build_endpoint_index(&spec);
+        let ordered = endpoints
+            .iter()
+            .map(|endpoint| {
+                (
+                    endpoint.group_key.clone(),
+                    endpoint.path.clone(),
+                    endpoint.method.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            ordered,
+            vec![
+                (
+                    "alpha".to_owned(),
+                    "/alpha-get".to_owned(),
+                    "GET".to_owned()
+                ),
+                (
+                    "alpha".to_owned(),
+                    "/alpha-post".to_owned(),
+                    "POST".to_owned()
+                ),
+                ("zeta".to_owned(), "/zeta".to_owned(), "GET".to_owned()),
+                ("Untagged".to_owned(), "/{id}".to_owned(), "GET".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn search_text_includes_group_and_tags() {
+        let spec = parse_spec(
+            r#"
+openapi: 3.1.0
+info:
+  title: demo
+  version: 1.0.0
+paths:
+  /pets:
+    get:
+      tags: [" Animals ", "catalog"]
+      operationId: listPets
+      description: List all pets in inventory
+      responses:
+        "200":
+          description: ok
+"#,
+        );
+
+        let endpoints = build_endpoint_index(&spec);
+        assert_eq!(endpoints.len(), 1);
+        let search_text = endpoints[0].search_text.clone();
+
+        assert!(search_text.contains("animals"));
+        assert!(search_text.contains("catalog"));
+        assert!(search_text.contains("listpets"));
+        assert!(search_text.contains("inventory"));
     }
 
     #[test]

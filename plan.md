@@ -1,673 +1,514 @@
-# apispec Architecture and Implementation Plan
+# apispec TUI Scalability and Readability Plan
 
-## 1. Product Contract (Locked)
+## 1. Problem Statement and Goals
 
-`apispec` is a Rust CLI + TUI tool for read-only exploration of OpenAPI specs.
+`apispec` already loads OpenAPI 3.1.0 specs and renders a functional flat endpoint list + text details panel. The current UX breaks down for large APIs (200+ endpoints) because:
 
-Non-negotiable requirements from `prompt.txt`:
+- the left panel is flat and hard to navigate,
+- there is no explicit panel focus model,
+- details are mostly a long wrapped text block,
+- request/response schemas are summarized into compact strings instead of navigable structures.
 
-1. Command is `apispec <source>`.
-2. `<source>` can be:
-   1. Local file.
-   2. Direct OpenAPI URL.
-   3. Base API URL where spec must be discovered automatically.
-3. Must cache locally and attempt refresh on every launch.
-4. If network is down, must use cached spec when available and clearly indicate offline mode.
-5. Only OpenAPI `3.1.0` is accepted. Everything else fails clearly.
-6. Interactive TUI:
-   1. Left: searchable endpoint list.
-   2. Right: selected endpoint details.
-   3. Keyboard-only navigation (`h/j/k/l` and arrows; plus search shortcuts).
-7. Show endpoint method/path, summary/description, grouped parameters, request body formats/schemas, responses/schemas.
-8. Prioritize startup speed, responsiveness, sensible defaults, clear errors.
+This plan defines a production-grade architecture and phased implementation to deliver:
 
-Out of scope:
+1. Hierarchical endpoint tree with expandable groups and search-aware auto-expansion.
+2. Explicit focus and keyboard interaction model for tree vs details.
+3. Structured details UI with sectioning, table-like parameter layout, and response/status styling.
+4. Expandable request/response bodies with readable, navigable schema tree rendering.
 
-1. API calling.
-2. Auth flow execution.
-3. Support for OpenAPI versions other than 3.1.0.
+Non-goals remain unchanged:
+
+- no API calling/auth/write operations,
+- no support beyond OpenAPI 3.1.0.
 
 ---
 
-## 2. Research-Based Tool Choices
+## 2. Current Architecture Baseline (Codebase Mapping)
 
-### 2.1 Core crates
+Current responsibilities:
 
-1. `clap` (CLI parsing): stable and ergonomic.
-2. `reqwest` + `rustls` (HTTP): robust HTTP client and conditional requests.
-3. `oas3` (OpenAPI 3.1 parser/model):
-   1. Explicitly targets OpenAPI 3.1.x.
-   2. Provides `Spec` with helper methods (`operations`, `operation_by_id`, `validate_version`).
-   3. Provides `ObjectOrReference::resolve` for `$ref` handling.
-4. `ratatui` + `crossterm` (TUI and keyboard events): proven stack for responsive terminal apps.
-5. `directories` (cross-platform cache dir).
-6. `serde`, `serde_json`, `serde_yaml` (metadata and tolerant format handling).
-7. `sha2` (stable cache keying from source identity).
-8. `thiserror` + `anyhow` (typed errors + context).
+- `src/spec/index.rs`
+  - builds flat `Vec<EndpointSummary>` sorted by path/method,
+  - resolves parameters/request body/responses into summary-level structs,
+  - computes basic search text.
+- `src/spec/render.rs`
+  - summarizes schemas into short strings (depth/node capped).
+- `src/tui/state.rs`
+  - holds app state, flat filter state, selected endpoint index,
+  - renders endpoint details as wrapped plain text lines.
+- `src/tui/keymap.rs`
+  - maps keys for a single "normal/search" mode model.
+- `src/tui/event.rs`
+  - event loop dispatches actions to state.
+- `src/tui/view.rs`
+  - renders search box, flat endpoint list, plain text details, help line.
 
-### 2.2 Why `oas3` over `openapiv3_1`
-
-1. `openapiv3_1` is explicitly marked as under active development.
-2. `oas3` has stronger navigation primitives (operations iterator + reference resolution APIs).
-3. `oas3` cleanly models OpenAPI 3.1 structures needed for endpoint extraction and schema rendering.
-
-### 2.3 Discovery standards and ecosystem defaults used
-
-1. `service-desc` link relation (RFC 8631 / IANA) for machine-readable service description discovery.
-2. Common framework defaults:
-   1. FastAPI: `/openapi.json`.
-   2. Springdoc: `/v3/api-docs`, `/v3/api-docs.yaml`.
-   3. Swashbuckle/ASP.NET: `/swagger/v1/swagger.json`.
+Implication: we need a state and rendering refactor, but no changes are required in source fetch/cache/version-validation paths.
 
 ---
 
-## 3. System Architecture (Final)
+## 3. Architecture Principles
 
-### 3.1 High-level flow
+Implementation will follow these principles:
 
-1. Parse CLI input.
-2. Classify source (`LocalFile | DirectUrl | BaseUrl`).
-3. Resolve to concrete spec location:
-   1. Local file directly.
-   2. Direct URL directly.
-   3. Base URL via discovery strategy.
-4. Load/refresh cache.
-5. Parse and validate spec (`openapi == "3.1.0"` strict).
-6. Build UI-ready index from `Spec`.
-7. Start TUI loop.
-
-### 3.2 Module layout
-
-```text
-src/
-  main.rs
-  cli.rs
-  app.rs
-  error.rs
-  source/
-    mod.rs
-    classify.rs
-    discover.rs
-    fetch.rs
-  cache/
-    mod.rs
-    store.rs
-    metadata.rs
-  spec/
-    mod.rs
-    load.rs
-    validate.rs
-    index.rs
-    render.rs
-  tui/
-    mod.rs
-    state.rs
-    event.rs
-    view.rs
-    keymap.rs
-```
-
-### 3.3 Core data models
-
-```text
-SourceInput { raw: String, kind: SourceKind, normalized_key: String }
-
-ResolvedSpecLocation {
-  canonical_source: String,      // for cache identity
-  spec_url: Option<Url>,         // if remote
-  local_path: Option<PathBuf>,   // if local
-  discovery_trace: Vec<String>,  // for diagnostics
-}
-
-CacheMetadata {
-  canonical_source: String,
-  resolved_spec_url: Option<String>,
-  etag: Option<String>,
-  last_modified: Option<String>,
-  fetched_at_utc: String,
-  last_success_at_utc: String,
-  openapi_version: String,
-  content_sha256: String,
-}
-
-LoadedSpec {
-  spec: oas3::Spec,
-  source_label: String,
-  cache_state: CacheState,       // Fresh | Revalidated304 | OfflineStale | NoCache
-}
-
-EndpointSummary {
-  id: usize,
-  method: String,
-  path: String,
-  title: String,                 // summary fallback method+path
-  description: Option<String>,
-  operation_id: Option<String>,
-  grouped_parameters: GroupedParameters,
-  request_body: Option<RequestBodyView>,
-  responses: Vec<ResponseView>,
-}
-```
+1. Separation of concerns:
+   - spec indexing/grouping logic in `spec/*`,
+   - UI interaction state machine in `tui/state.rs`,
+   - terminal rendering in `tui/view.rs`,
+   - key -> action mapping in `tui/keymap.rs`.
+2. Stable identity everywhere:
+   - endpoint IDs, group IDs, detail node IDs must be deterministic to preserve selection and expansion state.
+3. Predictable state transitions:
+   - explicit focus enum and contextual actions to avoid ambiguous key behavior.
+4. Incremental computation:
+   - precompute searchable tokens and grouping once,
+   - rebuild visible tree rows only when filter/expand state changes,
+   - cache expensive detail/schema rendering by width and endpoint identity.
+5. Graceful degradation:
+   - unresolved refs, missing tags/schemas, and uncommon schema forms never crash; always render a safe placeholder.
 
 ---
 
-## 4. Source Handling and Discovery
+## 4. Target Data Model Changes
 
-### 4.1 Source classification
+### 4.1 Extend endpoint index model
 
-1. If argument parses as URL:
-   1. If path suggests spec (`.json`, `.yaml`, `.yml`, `openapi`, `swagger`, `api-docs`) => `DirectUrl`.
-   2. Else => `BaseUrl`.
-2. Else treat as local path:
-   1. Must exist and be a file.
-   2. Else error with remediation hint.
+In `src/spec/index.rs`, extend `EndpointSummary` with fields needed for grouping and search:
 
-### 4.2 Base URL discovery algorithm (ordered)
+- `tags: Vec<String>` (normalized operation tags),
+- `group_key: String` (resolved display group),
+- `group_sort_key: String` (lowercased normalized key),
+- `search_text` expanded to include tags and operation metadata.
 
-1. Normalize base URL (trim trailing slash).
-2. Request base URL (`GET`, short timeout).
-3. Extract discovery hints in this order:
-   1. HTTP `Link` headers with `rel=service-desc`.
-   2. HTML `<link rel="service-desc" href="...">`.
-   3. Swagger/ReDoc script hints (`url`, `urls` in known bootstrap blocks).
-4. Probe known candidates (first success wins):
-   1. `/openapi.json`
-   2. `/openapi.yaml`
-   3. `/openapi.yml`
-   4. `/v3/api-docs`
-   5. `/v3/api-docs.yaml`
-   6. `/swagger/v1/swagger.json`
-   7. `/swagger.json`
-   8. `/swagger.yaml`
-5. For each candidate:
-   1. Fetch.
-   2. Parse as OpenAPI.
-   3. Validate strict version.
-   4. Accept on first valid match.
-6. If none resolve: return deterministic error listing attempted endpoints.
+Grouping derivation rules:
 
-### 4.3 HTTP policy
+1. Primary: first non-empty operation tag.
+2. Fallback: first path segment (`/users/{id}` -> `users`).
+3. Final fallback: `"Untagged"`.
 
-1. Build one reusable blocking client.
-2. Defaults:
-   1. Connect timeout: 5s.
-   2. Total timeout: 15s.
-   3. Redirects: enabled (safe default).
-3. Headers:
-   1. `Accept: application/json, application/yaml, text/yaml, */*`.
-   2. User-Agent: `apispec/<version>`.
-4. Optional conditional headers from cache:
-   1. `If-None-Match`.
-   2. `If-Modified-Since`.
+Sorting rules:
 
----
+- groups alphabetical (case-insensitive), `"Untagged"` forced last,
+- endpoints within group sorted by `path`, then method rank (`GET, POST, ...`), then method lexicographically.
 
-## 5. Cache Strategy
+### 4.2 Introduce tree view-model types
 
-### 5.1 Location and keying
+Add a tree model module (recommended: `src/tui/tree.rs`) to keep tree logic out of render code.
 
-1. Root: `ProjectDirs::from("dev", "apispec", "apispec").cache_dir()/specs`.
-2. Cache key: `sha256(canonical_source_string)`.
-3. Per-key files:
-   1. `spec.raw` (exact fetched/read bytes).
-   2. `metadata.json`.
+Core structures:
 
-### 5.2 Launch behavior (always refresh attempt)
+- `GroupNode { id, label, endpoint_ids }`
+- `TreeRow { kind: Group|Endpoint, group_id, endpoint_id, depth, is_expanded, is_match }`
+- `TreeModel { groups, rows_visible, expanded_groups, manual_expanded_groups }`
 
-1. Local file source:
-   1. Read local file every launch.
-   2. Update cache copy every launch.
-2. Remote source:
-   1. Attempt network refresh every launch.
-   2. Use conditional requests when metadata exists.
-   3. `304`: reuse cached bytes, mark `Revalidated304`.
-   4. `200`: replace cache bytes and metadata, mark `Fresh`.
-3. Network failure:
-   1. If cache exists: load cached bytes, mark `OfflineStale`.
-   2. If cache missing: fail with clear "offline and no cache" error.
+Notes:
 
-### 5.3 Offline indication
+- `manual_expanded_groups` preserves user toggles when no filter is active.
+- during active filter, matching groups are auto-expanded without mutating manual preferences.
 
-TUI status line must display one of:
+### 4.3 Introduce structured details model
 
-1. `Source: fresh`.
-2. `Source: cached (not modified)`.
-3. `Source: offline, using cached copy from <timestamp>`.
+Replace ad hoc string generation with structured rows (recommended: `src/tui/details.rs`):
+
+- `DetailSection` enum: `Overview`, `Parameters`, `RequestBody`, `Responses`, `Security`
+- `DetailRow`:
+  - text spans/styling payload,
+  - optional `row_id`,
+  - optional `toggle_target` (expand/collapse target),
+  - optional section association.
+- `DetailsDocument`:
+  - ordered rows,
+  - row index map for section navigation and focus.
+
+### 4.4 Schema tree model
+
+Add `src/spec/schema_tree.rs` for full schema traversal/resolution:
+
+- `SchemaNode { id, label, type_label, required, enum_values, description, example, ref_name, children }`
+- cycle-safe resolver with `visited_ref_stack`,
+- support for object/array/primitive/null and common composed forms (`oneOf`, `anyOf`, `allOf`) with safe fallback text when details are unavailable.
+
+Node IDs should be deterministic from traversal path (for stable expand state).
 
 ---
 
-## 6. Parsing, Validation, and Normalization
+## 5. Focus and Interaction State Machine
 
-### 6.1 Parse strategy
+Add explicit focus and richer details navigation to `AppState`:
 
-1. Try JSON parse path first when content-type or extension indicates JSON.
-2. Try YAML parse otherwise.
-3. If ambiguous/failure, attempt both before failing.
-4. Convert parse failures into concise actionable messages.
+- `FocusPanel { Tree, Details }`
+- keep `InputMode { Normal, Search }` for search capture behavior.
 
-### 6.2 Strict version gate (prompt requirement)
+Rules:
 
-1. Validate `spec.openapi == "3.1.0"` string exact match.
-2. Reject `3.1.1`, `3.1`, `3.0.x`, `2.0`, and malformed values.
-3. Error format:
-   1. "Unsupported OpenAPI version `<value>`."
-   2. "This tool currently supports only `3.1.0`."
+1. Tree focus
+   - `Up/Down`: move visible tree row selection.
+   - `Right/Enter` on group: expand/collapse group.
+   - `Enter` on endpoint: set selected endpoint and switch focus to details.
+2. Details focus
+   - `Up/Down`: scroll details or move selected detail row (for toggle targets).
+   - `Tab`: cycle `DetailSection`.
+   - `Enter`: toggle currently selected expandable item (request body, response code, content type, optional nested schema node).
+   - `Esc`: return focus to tree.
+3. Search mode
+   - remains text-entry overlay mode,
+   - filter applies to group label, endpoint path, operationId, tags, summary/title,
+   - matching groups auto-expand while filter is non-empty.
 
-### 6.3 Resilience policy
-
-1. No silent failures.
-2. Unknown/extra fields are tolerated by parser.
-3. Unresolved refs do not crash UI; they degrade to readable placeholders.
-
----
-
-## 7. Endpoint Indexing and Rendering
-
-### 7.1 Building endpoint list
-
-1. Iterate all `spec.paths`.
-2. For each `PathItem`, collect operations by HTTP method.
-3. Produce sorted `Vec<EndpointSummary>`:
-   1. Primary sort: path.
-   2. Secondary sort: method order (`GET`, `POST`, `PUT`, `PATCH`, `DELETE`, `OPTIONS`, `HEAD`, `TRACE`).
-
-### 7.2 Parameters (grouped + override rules)
-
-1. Collect path-level parameters.
-2. Collect operation-level parameters.
-3. Merge by `(name, in)` key where operation-level overrides path-level.
-4. Group output into:
-   1. Path
-   2. Query
-   3. Header
-   4. Cookie
-
-### 7.3 Request bodies and responses
-
-1. Resolve `ObjectOrReference` where possible via `resolve(&spec)`.
-2. Request body view:
-   1. Show required flag.
-   2. For each media type, show schema summary.
-3. Response view:
-   1. Show status code/default.
-   2. Show description.
-   3. Show media types with schema summaries.
-
-### 7.4 Schema summarizer (concise, readable)
-
-1. Output target: plain text lines optimized for terminal width.
-2. Rules:
-   1. Prefer type + format first (`object`, `array<string>`, `string(uuid)`).
-   2. Show required properties first.
-   3. Limit recursive expansion depth (`max_depth=2`) and node count per schema.
-   4. Detect cycles via visited ref paths.
-   5. On cutoff, append "..." with count hint.
+Add transition tests to guarantee no invalid state combinations.
 
 ---
 
-## 8. TUI Architecture
+## 6. Rendering Plan (ratatui)
 
-### 8.1 Layout
+### 6.1 Left panel tree
 
-1. Top status bar (source/cache/version/filter stats).
-2. Main split:
-   1. Left pane (search + endpoint list).
-   2. Right pane (details for selected endpoint).
-3. Bottom help bar (key hints).
+In `src/tui/view.rs`:
 
-### 8.2 Interaction model
+- replace flat endpoint list with tree rows:
+  - group rows prefixed with fold indicators (`[-]`, `[+]`),
+  - endpoint rows indented under group.
+- apply focused panel styling:
+  - focused panel border/header uses accent style,
+  - unfocused panel uses muted style.
+- preserve item count in title:
+  - total endpoints + filtered visible endpoints.
 
-1. Normal mode:
-   1. `j/k` or `Down/Up`: move selection.
-   2. `g` / `G`: first/last endpoint.
-   3. `PageUp/PageDown`: jump.
-   4. `q`: quit.
-   5. `/` or `Ctrl+s`: enter search mode.
-2. Search mode:
-   1. Type to filter.
-   2. `Esc`: exit search mode.
-   3. `Backspace`: delete.
-   4. `Enter`: keep current query and return to normal.
+### 6.2 Right panel structured details
 
-### 8.3 Search behavior
+Render using section headers and separators:
 
-1. Case-insensitive substring search.
-2. Search fields:
-   1. Method.
-   2. Path.
-   3. Summary.
-   4. Operation ID.
-3. Incremental update on each keystroke.
-4. Always keep UI responsive by filtering against precomputed lowercase index strings.
+- prominent endpoint header (`METHOD PATH`) with method color,
+- summary + description,
+- sections: Parameters, Request Body, Responses, Security.
 
-### 8.4 Performance controls
+Parameters layout:
 
-1. Precompute endpoint labels and search index tokens at load time.
-2. Cache rendered detail lines per selected endpoint + width bucket.
-3. Do not resolve/render every endpoint body at startup; do lazy detail rendering.
+- fixed columns with width allocation by available area:
+  - `name`, `in`, `required`, `type`, `description`.
+- truncate and wrap description safely.
 
----
+Responses:
 
-## 9. Error Model and UX Messages
+- status code badges with semantic colors:
+  - success (2xx) green-ish,
+  - redirect/info/warn/error distinct subdued palette.
+- show status + description + content types.
 
-### 9.1 Error categories
+Request/response expansion:
 
-1. CLI/input errors.
-2. Discovery errors.
-3. HTTP/network errors.
-4. Cache read/write errors.
-5. Parse errors.
-6. Version validation errors.
-7. TUI runtime errors.
+- collapsed row shows compact summary,
+- expanded row inserts schema tree rows below with indentation guides.
 
-### 9.2 Message standard
+Orientation aids:
 
-Every surfaced error must include:
-
-1. What failed.
-2. Why (if known).
-3. What user can do next.
-
-Example:
-
-`Could not discover an OpenAPI spec from base URL https://api.example.com.
-Tried: /openapi.json, /v3/api-docs, /swagger/v1/swagger.json.
-If your spec lives elsewhere, pass it directly: apispec <full-spec-url>.`
+- breadcrumb line for active schema node path in details focus,
+- highlighted current detail row when details panel is focused.
 
 ---
 
-## 10. Implementation Phases
+## 7. Search and Filtering Behavior
 
-## Phase 1: Bootstrap and plumbing
+Filtering strategy:
 
-Checklist:
+1. Normalize query to lowercase, split by whitespace tokens.
+2. Endpoint matches if all tokens appear across combined searchable text:
+   - path, method, title, operationId, tags, group label.
+3. Group matches if:
+   - group label matches tokens, or
+   - any child endpoint matches.
 
-- [x] Create crate and module skeleton.
-- [x] Add dependencies and error scaffolding.
-- [x] Implement CLI arg parsing.
-- [x] Implement source classification.
+Display strategy:
 
-Exit criteria:
+- no filter: show all groups using manual expansion state.
+- filter active:
+  - show only groups with matches,
+  - show only matching endpoints in each shown group,
+  - auto-expand shown groups.
 
-- [x] `apispec <source>` validates inputs and reaches source resolution flow.
+Selection strategy:
 
-## Phase 2: Fetch + cache + strict validation
-
-Checklist:
-
-- [x] Implement local load path.
-- [x] Implement remote fetch with conditional requests.
-- [x] Implement cache storage and metadata.
-- [x] Implement parse + strict `3.1.0` validation.
-
-Exit criteria:
-
-- [x] Works for local and direct URL.
-- [x] Fails cleanly for non-3.1.0.
-- [x] Offline fallback works with existing cache.
-
-## Phase 3: Discovery and indexing
-
-Checklist:
-
-- [x] Implement base URL discovery algorithm.
-- [x] Implement endpoint extraction and parameter merge.
-- [x] Implement request/response/schema summary renderer.
-
-Exit criteria:
-
-- [x] Base URL discovery succeeds on representative defaults.
-- [x] Endpoint summaries are complete and readable.
-
-## Phase 4: TUI
-
-Checklist:
-
-- [x] Implement app state and event loop.
-- [x] Implement left pane searchable list.
-- [x] Implement right pane detail rendering + scrolling.
-- [x] Add cache/offline status indicators.
-- [x] Add non-TUI fallback mode (`--no-tui`) for safe diagnostics.
-- [x] Add terminal compatibility flags (`--no-alt-screen`, `APISPEC_NO_ALT_SCREEN`).
-- [x] Fix long-token wrapping freeze in detail renderer.
-
-Exit criteria:
-
-- [x] Keyboard-only navigation complete.
-- [x] UI remains responsive on representative large specs (validated with 210-endpoint spec and wrapping fix).
-
-## Phase 5: Hardening and release quality
-
-Checklist:
-
-- [x] Add unit and integration tests (core coverage in place for classify/discover/fetch/cache/load/index/render/tui state).
-- [x] Add snapshot tests for schema summary output.
-- [x] Run `fmt`, `clippy`, `test` as final release gate (`fmt`/`test`/`clippy` all passing with strict warnings gate).
-- [x] Add README usage examples and error behavior doc.
-
-Exit criteria:
-
-- [x] Test suite green.
-- [x] No clippy warnings in project code.
-- [x] Clear docs for normal and offline usage.
+- preserve previously selected endpoint when still visible,
+- otherwise select first visible row,
+- reset detail scroll when selected endpoint changes.
 
 ---
 
-## 11. Test Plan
+## 8. Expand/Collapse and Schema Navigation Details
 
-### 11.1 Unit tests
+Expandable entities:
 
-1. Source classification matrix.
-2. Discovery candidate URL generation.
-3. Strict version validator.
-4. Parameter merge rules.
-5. Schema summarizer depth/cycle behavior.
+1. Request Body section.
+2. Each response status block (e.g., `200`, `400`).
+3. Each response content-type row.
+4. Optional: nested schema object/array nodes.
 
-### 11.2 Integration tests
+State storage:
 
-1. Local JSON spec load.
-2. Local YAML spec load.
-3. Remote spec fetch 200.
-4. Remote conditional fetch 304.
-5. Offline + cache fallback.
-6. Offline + no cache failure.
-7. Base URL discovery from:
-   1. `Link: rel=service-desc`.
-   2. `/openapi.json`.
-   3. `/v3/api-docs`.
-8. Version mismatch rejection (`3.1.1`, `3.0.3`).
+- `HashSet<ToggleId>` inside `DetailsState`.
+- `ToggleId` deterministic key examples:
+  - `request_body`,
+  - `response:200`,
+  - `response:200:application/json`,
+  - `schema:request_body:application/json:/properties/user`.
 
-### 11.3 Manual QA
+Schema rendering behavior:
 
-1. Very large spec (thousands of operations).
-2. Narrow terminal width behavior.
-3. Search and navigation ergonomics.
-4. Clear offline banner visibility.
+- resolve internal refs where possible, include reference name label,
+- show required markers,
+- show type and enum values (compact),
+- wrap descriptions and compact examples,
+- detect cycles and render `[cycle: RefName]`,
+- unresolved refs render `[unresolved: #/components/... ]`.
 
 ---
 
-## 12. Performance Targets
+## 9. Performance Plan
 
-1. Startup (cached or local): under 500ms for medium specs (~500 operations).
-2. Startup (fresh network, excluding server latency): under 1.5s for medium specs.
-3. Navigation input-to-render latency: below 50ms in normal usage.
-4. Search update latency: below 100ms for ~5k endpoints.
+Target: interactive feel for 200+ endpoints and deep schemas.
 
----
+Controls:
 
-## 13. Risks and Mitigations
+1. One-time index + grouping build on startup.
+2. Tree visible rows rebuilt only when:
+   - search query changes,
+   - group expansion changes.
+3. Detail document cached by:
+   - endpoint ID,
+   - width bucket,
+   - expansion state fingerprint.
+4. Schema expansion is lazy:
+   - do not flatten entire schema tree when collapsed.
+5. String allocations minimized:
+   - precompute lowercase search strings once.
 
-1. Risk: Discovery false negatives on custom docs endpoints.
-   1. Mitigation: deterministic candidate list + service-desc parsing + clear failure output.
-2. Risk: Complex external `$ref` chains.
-   1. Mitigation: resolve local refs robustly; degrade unresolved refs gracefully; never crash.
-3. Risk: Terminal key differences across OSes.
-   1. Mitigation: support both vim keys and arrow keys; avoid platform-specific key assumptions.
-4. Risk: Cache corruption.
-   1. Mitigation: atomic writes via temp file + rename; metadata/content hash checks.
+Validation:
 
----
-
-## 14. Definition of Done
-
-1. `apispec <local-file>` works end-to-end.
-2. `apispec <direct-url>` works end-to-end.
-3. `apispec <base-url>` discovers and loads spec on common defaults.
-4. Offline fallback works exactly as specified.
-5. Strict version gate enforces only `3.1.0`.
-6. TUI displays required endpoint details and remains responsive.
-7. Tests cover critical behaviors and pass in CI.
+- add micro-benchmark-like tests for tree rebuild on synthetic large specs (unit-level timing assertions should be coarse and deterministic).
 
 ---
 
-## 15. Primary References Used
+## 10. Robustness and Edge Cases
 
-1. OpenAPI specification 3.1.0: https://spec.openapis.org/oas/v3.1.0
-2. OpenAPI patch release note (3.1.1 context): https://www.openapis.org/blog/2024/10/25/announcing-openapi-specification-patch-releases
-3. `oas3` crate docs: https://docs.rs/oas3/latest/oas3/
-4. `oas3::spec::Spec` docs: https://docs.rs/oas3/latest/oas3/spec/struct.Spec.html
-5. `oas3::spec::Operation` docs: https://docs.rs/oas3/latest/oas3/spec/struct.Operation.html
-6. `oas3::spec::ObjectOrReference` docs: https://docs.rs/oas3/latest/oas3/spec/enum.ObjectOrReference.html
-7. `ratatui` list state docs: https://docs.rs/ratatui/latest/ratatui/widgets/struct.ListState.html
-8. `crossterm` event docs: https://docs.rs/crossterm/latest/crossterm/event/index.html
-9. `reqwest` blocking client docs: https://docs.rs/reqwest/latest/reqwest/blocking/
-10. `directories::ProjectDirs` docs: https://docs.rs/directories/latest/directories/struct.ProjectDirs.html
-11. RFC 8631 (`service-desc`): https://www.rfc-editor.org/rfc/rfc8631.html
-12. IANA link relations registry: https://www.iana.org/assignments/link-relations
-13. FastAPI default OpenAPI URL: https://fastapi.tiangolo.com/tutorial/metadata/
-14. Springdoc default docs endpoints: https://springdoc.org/
-15. Microsoft Swashbuckle sample endpoint convention: https://learn.microsoft.com/en-us/samples/dotnet/aspnetcore.docs/getstarted-swashbuckle-aspnetcore/
+Must handle without panic or broken UI:
+
+- missing tags and empty tag strings,
+- paths with no meaningful segment (`/`, `/{id}`),
+- unresolved parameter/request/response/schema refs,
+- responses lacking descriptions/content,
+- non-JSON content types,
+- endpoints with very long descriptions/enum/example text,
+- mixed nullable/union/composed schema forms,
+- empty specs (`paths: {}`) and filter-no-match states.
 
 ---
 
-## 16. Execution Checklist
+## 11. File-Level Implementation Plan
 
-### Phase 1: Bootstrap and plumbing
+### Phase 1: Data/index foundation
 
-- [x] Create Rust binary crate (`apispec`) and baseline project structure.
-- [x] Add initial dependencies for CLI/input plumbing (`clap`, `thiserror`, `url`).
-- [x] Implement `main` startup flow and centralized error output.
-- [x] Implement CLI parsing for `apispec <source>`.
-- [x] Implement source classification (`LocalFile | DirectUrl | BaseUrl`).
-- [x] Validate local source paths (exists + file) with clear error types.
-- [x] Add initial module skeleton matching architecture (`source`, `cache`, `spec`, `tui`).
-- [x] Add unit tests for source classification paths.
-- [x] Satisfy Phase 1 exit criterion: command resolves input and prints source kind.
+Files:
 
-### Phase 2: Fetch + cache + strict validation
+- `src/spec/index.rs`
+  - extend endpoint metadata and search payload,
+  - implement group key derivation and deterministic sorting helpers.
+- `src/spec/mod.rs`
+  - export any new modules as needed.
 
-- [x] Implement local/remote loading path with refresh-on-launch behavior.
-- [x] Implement cache store and metadata model.
-- [x] Implement conditional HTTP refresh (`ETag` / `Last-Modified`).
-- [x] Implement offline fallback from cache.
-- [x] Implement parse + strict OpenAPI `3.1.0` validation.
+Deliverable: grouped-ready endpoint index with tests.
 
-### Phase 3: Discovery and indexing
+### Phase 2: Tree model and state machine
 
-- [x] Implement base URL discovery algorithm and candidate probing.
-- [x] Build endpoint index and parameter grouping/merge logic.
-- [x] Implement request/response/schema summary rendering.
+Files:
 
-### Phase 4: TUI
+- `src/tui/state.rs`
+  - add `FocusPanel`,
+  - replace flat filtered list state with tree-aware selection + expansion state,
+  - preserve endpoint selection across filter changes.
+- `src/tui/tree.rs` (new)
+  - tree row generation, filtering projection, expansion logic.
+- `src/tui/keymap.rs`
+  - add contextual actions for tree/details focus, tab section navigation, toggle detail items.
+- `src/tui/event.rs`
+  - dispatch new actions and clamp selection/scroll safely.
 
-- [x] Implement interactive terminal app loop and key handling.
-- [x] Implement searchable endpoint list pane.
-- [x] Implement endpoint detail pane with concise schema display.
-- [x] Surface cache/offline status in UI chrome.
+Deliverable: keyboard behavior contract implemented and unit-tested.
 
-### Phase 5: Hardening and release quality
+Status: Done (implemented in this session).
 
-- [x] Expand unit/integration coverage for cache/discovery/validation.
-- [x] Add snapshot-style tests for schema rendering.
-- [x] Run and clean `fmt`/`clippy`/`test`.
-- [x] Finalize user-facing docs and usage examples.
+### Phase 3: Structured details and schema engine
+
+Files:
+
+- `src/spec/schema_tree.rs` (new)
+  - schema resolver/traverser + node model + cycle handling.
+- `src/tui/details.rs` (new)
+  - details document builder, row IDs, toggle targets, section index map.
+- `src/tui/state.rs`
+  - details focus state, expanded toggle storage, breadcrumb tracking.
+
+Deliverable: expandable request/response/schema content with deterministic row IDs.
+
+Status: Done (implemented in this session).
+
+### Phase 4: Visual rendering integration
+
+Files:
+
+- `src/tui/view.rs`
+  - render tree UI (indents, fold indicators, focus styling),
+  - render structured detail sections with table-like parameter rows and response badges,
+  - render breadcrumb + focused row visuals.
+
+Deliverable: final UX with explicit focus indicators and scannable details.
+
+Status: Done (implemented in this session).
+
+### Phase 5: Docs and polish
+
+Files:
+
+- `README.md`
+  - document grouping rules,
+  - document tree vs details keybindings,
+  - explain expand/collapse behavior for request/response bodies and schema nodes.
+
+Deliverable: docs aligned with final keyboard model and behavior.
+
+Status: Done (implemented in this session).
 
 ---
 
-## 17. Session Handoff Notes (After Phase 5)
+## 12. Test Strategy
 
-Use this section when resuming after context reset.
+### Unit tests
 
-### 17.1 Current implementation status
+- grouping fallback behavior (tag -> first path segment -> `Untagged`),
+- group/order stability and `Untagged` last,
+- filter matching coverage (group name, path, operationId, tags),
+- focus transition tests (tree/details/search),
+- toggle state behavior for request/response/schema nodes,
+- schema resolver tests for cycles, unresolved refs, composed schema cases.
 
-1. Phase 1 is complete.
-2. Phase 2 is complete.
-3. Phase 3 is complete for:
-   1. Base URL discovery (`service-desc` header, HTML link hints, script URL hints, candidate probing).
-   2. Base URL loader integration with existing cache/offline behavior.
-   3. Endpoint indexing with deterministic path/method sorting.
-   4. Parameter merge and grouping with operation-level override.
-   5. Request/response/media type rendering and schema summaries with depth/node limits, cycle detection, and unresolved-ref placeholders.
-4. Phase 4 is complete (interactive TUI, search, detail scrolling/wrapping, status/help bars, no-TUI and no-alt-screen modes).
-5. Phase 5 is complete (expanded test coverage including schema snapshots, strict clippy gate, and README docs).
+### State/model tests
 
-### 17.2 Key runtime behavior (as implemented)
+- selection preservation across filter changes,
+- auto-expand behavior only while filter is active,
+- detail section tab navigation order,
+- scroll clamping after resize and expansion collapse.
 
-1. `apispec <local-file>`:
-   1. Reads file.
-   2. Parses + validates strict `3.1.0`.
-   3. Writes cached bytes + metadata.
-2. `apispec <direct-spec-url>`:
-   1. Reads cache metadata if present.
-   2. Sends conditional request when metadata has validators.
-   3. `200` -> parse/validate + overwrite cache.
-   4. `304` -> load cached bytes.
-   5. Network unavailable:
-      1. With cache -> load cache (`OfflineStale`).
-      2. Without cache -> fail with `OfflineNoCache`.
-3. `apispec <base-url>`:
-   1. Tries discovery via `service-desc` hints and common framework defaults.
-   2. Validates discovered candidates as strict OpenAPI `3.1.0`.
-   3. Uses discovered URL for fetch/conditional refresh.
-   4. Falls back to cached copy on network failure when cache exists.
-4. CLI currently prints:
-   1. Resolved source kind.
-   2. Resolved spec source.
-   3. Loaded OpenAPI version.
-   4. Cache state + timestamp (when available).
-   5. Indexed endpoint count.
+### Snapshot tests
 
-### 17.3 Important code locations
+- detail rendering at multiple width buckets,
+- parameter table alignment and wrapping,
+- response status styling labels and expanded schema tree layout.
 
-1. Loader orchestration + base URL discovery integration: `src/spec/load.rs`.
-2. Discovery implementation: `src/source/discover.rs`.
-3. Strict parse/validate logic: `src/spec/validate.rs`.
-4. HTTP fetch + conditional headers: `src/source/fetch.rs`.
-5. Endpoint indexing and grouping: `src/spec/index.rs`.
-6. Schema and media rendering summaries: `src/spec/render.rs`.
-7. Cache metadata/state model: `src/cache/metadata.rs`.
-8. Cache store implementation: `src/cache/store.rs`.
-9. Error surface/messages: `src/error.rs`.
-10. CLI output integration: `src/app.rs`.
+### Regression tests
 
-### 17.4 Cache and environment notes
+- no endpoints,
+- huge endpoint list synthetic fixture,
+- deeply nested schema fixture.
 
-1. Default cache root:
-   `ProjectDirs::from("dev", "apispec", "apispec").cache_dir()/specs`.
-2. Cache key:
-   `sha256(canonical_source)`.
-3. Override cache root for local testing:
-   set `APISPEC_CACHE_DIR=<path>`.
-4. Cache metadata parse errors are intentionally tolerated (metadata becomes `None`) so stale-but-valid cached spec bytes still load.
+---
 
-### 17.5 Validation status at handoff
+## 13. Definition of Done
 
-Last successful checks:
+All are required:
 
-1. `cargo fmt`
-2. `cargo clippy --all-targets -- -D warnings`
-3. `cargo test` (`45` passing tests)
+1. All prompt feature requirements implemented end-to-end.
+2. No crashes on missing tags/schemas/uncommon refs.
+3. Keyboard controls are deterministic and documented.
+4. Tree filtering/expansion is responsive for 200+ endpoints.
+5. Details panel is visibly structured with expandable bodies and readable schema tree.
+6. `cargo test` passes and README update is complete.
 
-### 17.6 Suggested next work (optional)
+---
 
-1. Add CI workflow that enforces `fmt`, strict `clippy`, and `test` on pull requests.
-2. Add larger-spec benchmarks to track startup/search/render latency targets.
-3. Add optional export formats for `--no-tui` output (for scripting/reporting workflows).
+## 14. Execution Order and Risk Management
 
-### 17.7 Guardrails to keep
+Recommended execution order:
 
-1. Keep strict OpenAPI support gate at exact `3.1.0` unless product requirement changes.
-2. Preserve offline behavior:
-   1. never silently fail,
-   2. never ignore network failure without explicit cached fallback state.
-3. Keep cache writes atomic (temp file + rename).
+1. Implement data model + grouping first.
+2. Implement tree state and keymap state machine.
+3. Implement structured details model and schema engine.
+4. Integrate rendering and styling.
+5. Harden edge cases and finalize docs/tests.
+
+Main risks and mitigation:
+
+- Risk: state complexity explosion across search/focus/expand.
+  - Mitigation: centralized action reducer pattern in `AppState` plus transition tests.
+- Risk: schema traversal regressions and cycles.
+  - Mitigation: dedicated `schema_tree` module with strict cycle detection and fixtures.
+- Risk: performance regressions.
+  - Mitigation: cached render documents and incremental row rebuild boundaries.
+
+This plan keeps responsibilities modular and testable, and is intentionally aligned with the existing crate structure to minimize migration risk.
+
+---
+
+## 15. Session Restore Checklist
+
+Use this as a resumable execution checklist after clearing context.
+
+### Pre-flight
+
+- [x] Re-read `prompt.txt` requirements and non-goals.
+- [x] Re-read this `plan.md` and confirm scope is unchanged.
+- [x] Run `git status --short` and note unrelated local changes.
+- [x] Run `cargo test` to capture baseline failures (if any) before edits.
+
+### Phase 1: Data/index foundation
+
+- [x] Extend `EndpointSummary` with `tags`, `group_key`, `group_sort_key`.
+- [x] Implement group-key derivation: first tag -> first path segment -> `Untagged`.
+- [x] Expand search text to include tags/group metadata.
+- [x] Add deterministic group and endpoint ordering helpers.
+- [x] Add/refresh unit tests in `src/spec/index.rs` for grouping fallback and ordering.
+- [x] Run `cargo test` and fix regressions before moving on.
+
+### Phase 2: Tree model and state machine
+
+- [x] Create `src/tui/tree.rs` with group nodes, visible rows, expansion logic.
+- [x] Replace flat filtered list state in `src/tui/state.rs` with tree-aware state.
+- [x] Add `FocusPanel { Tree, Details }` and transition-safe reducers.
+- [x] Preserve endpoint selection across filter updates where possible.
+- [x] Update `src/tui/keymap.rs` with tree/details contextual actions.
+- [x] Update `src/tui/event.rs` dispatch to new actions and clamping logic.
+- [x] Add tests for selection persistence, auto-expand-on-filter, focus transitions.
+- [x] Run `cargo test`.
+
+### Phase 3: Structured details and schema engine
+
+- [x] Add `src/spec/schema_tree.rs` for resolved, cycle-safe schema traversal.
+- [x] Add `src/tui/details.rs` for sectioned detail document and row/toggle IDs.
+- [x] Add expand/collapse state for request body, responses, content types, schema nodes.
+- [x] Add breadcrumb/active-node tracking in details focus.
+- [x] Add tests for cycles, unresolved refs, composed schema fallback behavior.
+- [x] Run `cargo test`.
+
+### Phase 4: Rendering integration
+
+- [x] Replace flat list render with tree render in `src/tui/view.rs`.
+- [x] Add focused vs unfocused panel visual styling.
+- [x] Render details as structured sections instead of plain wrapped text dump.
+- [x] Implement parameter table-like layout and response status badge styling.
+- [x] Render expandable schema blocks and active detail-row highlight.
+- [x] Validate behavior manually with a large spec (200+ endpoints).
+- [x] Run `cargo test`.
+
+### Phase 5: Docs and polish
+
+- [x] Update `README.md` grouping behavior docs.
+- [x] Update `README.md` keybindings for tree focus vs details focus.
+- [x] Update `README.md` expand/collapse behavior for bodies/schemas.
+- [x] Add any missing regression tests discovered during manual QA.
+- [x] Run `cargo test` and ensure green.
+
+### Final acceptance gate
+
+- [x] No crashes on missing tags/schemas/unresolved refs.
+- [x] Tree filtering and expansion remains responsive on large specs.
+- [x] Keyboard navigation is consistent and matches README.
+- [x] Details are visually scannable and schema navigation is usable.
+- [x] `git diff` only contains intentional changes.
